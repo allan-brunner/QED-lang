@@ -287,6 +287,11 @@ describe("Parser - Collections, control flow & statements", () => {
     expect(parseExpr('{"a": 1}').kind).toBe("MapLit");
   });
 
+  it("distinguishes lists [1, 2, 3] from dynamic lists [1 to 3]", () => {
+    expect(parseExpr("[1, 2, 3]").kind).toBe("ListLit");
+    expect(parseExpr('[1 to 3]').kind).toBe("ListDynamicLit");
+  });
+
   it.skip("parses blocks with implicit return expressions vs semicolon statements", () => {
     const withReturn = parseExpr("{ let x = 2; x * 3 }");
     expect(withReturn.kind).toBe("Block");
@@ -295,8 +300,15 @@ describe("Parser - Collections, control flow & statements", () => {
     expect(voidBlock.kind).toBe("Block");
   });
 
-  it.skip("parses if/else and match expressions", () => {
-    expect(parseExpr("if x > 0 { x } else { -x }").kind).toBe("IfExpr");
-    expect(parseExpr("match n { 0 => 1, _ => n }").kind).toBe("MatchExpr");
+  it("parses while and for expressions", () => {
+    expect(parseExpr("while i != 0 i").kind).toBe("While");
+    expect(parseExpr("while i > 0 {i + 4}").kind).toBe("While");
+    expect(parseExpr("for _ in [1, 2, 3] {1 + 3;}").kind).toBe("For");
+    expect(parseExpr("for i in [1 to 3 by 1] i").kind).toBe("For");
+  });
+
+  it("parses if/else and match expressions", () => {
+    expect(parseExpr("if x > 0 { x } else { -x }").kind).toBe("If");
+    expect(parseExpr("match n { 0 => 1 _ => {n} }").kind).toBe("Match");
   });
 });

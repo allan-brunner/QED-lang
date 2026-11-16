@@ -76,6 +76,54 @@ export class Parser {
     return exprs;
   }
 
+  private parseProgram(): Stmt[] {
+    const stmts: Stmt[] = [];
+    while (this.match(TokenType.EOF)) {
+      stmts.push(this.parseStatement());
+    }
+    return stmts;
+  }
+
+  private parseStatement(): Stmt {
+    return this.parseExprStmt();
+  }
+
+  private parseExprStmt(): Stmt {
+    const expr = this.parseExpression();
+
+    if (this.match(TokenType.SEMICOLON)) {
+      return { kind: "ExprStmt", expr };
+    }
+
+    return { kind: "ExprStmt", expr, value: expr };
+  }
+
+  private parseBlockBody(token: Token, firstStmt?: Stmt): Expr {
+    const statements: Stmt[] = firstStmt ? [firstStmt] : [];
+
+    while (!this.check(TokenType.RIGHT_BRACE) && !this.isAtEnd()) {
+      statements.push(this.parseStatement());
+    }
+
+    this.consume(TokenType.RIGHT_BRACE, "Expected '}' after block.");
+
+    let returnExpr = undefined;
+    if (statements.length > 0) {
+      const last = statements[statements.length - 1];
+
+      if (last.kind === "ExprStmt" && last.value !== undefined) {
+        returnExpr = last.value;
+        statements.pop();
+      }
+    }
+    return { kind: "Block", statements, returnExpr, token };
+  }
+
+  private parseBlock(): Expr {
+    const token = this.previous();
+    return this.parseBlockBody(token);
+  }
+
   public parseExpression(): Expr {
     return this.parseTernary();
   }
@@ -243,6 +291,42 @@ export class Parser {
     );
   }
 
+  private parseIfExpr(): Expr {
+    const condition = this.parseExpression();
+
+    let success: Expr;
+    if (this.match(TokenType.LEFT_BRACE)) {
+      success = this.parseBlock();
+    } else {
+      success = this.parseExpression();
+    }
+
+    let fail: Expr | undefined;
+    if (this.match(TokenType.ELSE)) {
+      if (this.match(TokenType.IF)) {
+        fail = this.parseIfExpr();
+      } else if (this.match(TokenType.LEFT_BRACE)) {
+        fail = this.parseBlock();
+      } else {
+        fail = this.parseExpression();
+      }
+    }
+
+    return { kind: "If", condition, success, fail };
+  }
+
+  private parseMatchArm(): { patterns: Expr[], success: Expr } {
+    const patterns = this.parseExprWhile(
+      () => this.parsePrimary(),
+      TokenType.PIPE
+    );
+    this.consume(TokenType.FAT_ARROW, "Expected '=>' after pattern.");
+    let success = this.match(TokenType.LEFT_BRACE)
+      ? this.parseBlock()
+      : this.parseExpression();
+    return { patterns, success };
+  }
+
   private parsePrimary(): Expr {
     if (this.match(TokenType.INT_LIT)) {
       const token = this.previous();
@@ -280,18 +364,82 @@ export class Parser {
       return { kind: "Identifier", name: token.lexeme, token }
     }
 
+    if (this.match(TokenType.UNDERLINE)) {
+      const token = this.previous();
+      return { kind: "Wildcard", token }
+    }
+
     if (this.match(TokenType.LEFT_PAREN)) {
       const expr = this.parseExpression();
       this.consume(TokenType.RIGHT_PAREN, "Expected ')' after expression.");
       return { kind: "Grouping", expr };
     }
 
+    if (this.match(TokenType.IF)) {
+      return this.parseIfExpr();
+    }
+
+    if (this.match(TokenType.WHILE)) {
+      let condition;
+      if (this.match(TokenType.LEFT_BRACE)) {
+        condition = this.parseBlock()
+      } else {
+        condition = this.parseExpression();
+      }
+
+      let block;
+      if (this.match(TokenType.LEFT_BRACE)) {
+        block = this.parseBlock();
+      } else {
+        block = this.parseExpression();
+      }
+      return { kind: "While", condition, block };
+    }
+
+    if (this.match(TokenType.FOR)) {
+      if (!this.match(TokenType.IDENT, TokenType.UNDERLINE)) {
+        const tok = this.peek();
+        throw new Error(`Parse error at ${tok.line}:${tok.column}: Expected identifier or '_' after 'for'.`);
+      }
+      const identifier = this.previous();
+
+      this.consume(TokenType.IN, "Expected 'in' after identifier in for expression.");
+      const expr = this.parseExpression();
+      let block;
+      if (this.match(TokenType.LEFT_BRACE)) {
+        block = this.parseBlock();
+      } else {
+        block = this.parseExpression();
+      }
+      return { kind: "For", identifier, expr, block };
+    }
+
+    if (this.match(TokenType.MATCH)) {
+      const expr = this.parseExpression();
+      this.consume(TokenType.LEFT_BRACE, "Expected '{' for match.");
+      let arms: { readonly patterns: readonly Expr[]; readonly success: Expr }[] = [];
+      while (!this.check(TokenType.RIGHT_BRACE) && !this.isAtEnd()) {
+        arms.push(this.parseMatchArm());
+      }
+      this.consume(TokenType.RIGHT_BRACE, "Expected '}' after match body.");
+      return { kind: "Match", expr, arms };
+    }
+
     if (this.match(TokenType.LEFT_BRACKET)) {
       const token = this.previous();
-      const elements = this.check(TokenType.RIGHT_BRACKET)
-        ? []
-        : this.parseExprWhile(() => this.parseExpression(), TokenType.COMMA);
-      this.consume(TokenType.RIGHT_BRACKET, "Expected ']' after list.");
+      let elements: Expr[] = [];
+      if (!this.match(TokenType.RIGHT_BRACKET)) {
+        const first = this.parseExpression();
+        if (this.match(TokenType.TO, TokenType.UNTIL)) {
+          const last = this.parseExpression();
+          const step = this.match(TokenType.BY) ? this.parseExpression() : undefined;
+          this.consume(TokenType.RIGHT_BRACKET, "Expected ']' after list.");
+          return { kind: "ListDynamicLit", start: first, end: last, step };
+        } else {
+          elements = this.parseExprWhile(() => this.parseExpression(), TokenType.COMMA, first);
+        }
+        this.consume(TokenType.RIGHT_BRACKET, "Expected ']' after list.");
+      }
       return { kind: "ListLit", elements, token };
     }
 

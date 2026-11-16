@@ -28,8 +28,10 @@ export type Expr =
   | { readonly kind: "BooleanLit"; readonly value: boolean; readonly token: Token }
   | { readonly kind: "NoneLit"; readonly token: Token }
   | { readonly kind: "Identifier"; readonly name: string; readonly token: Token }
+  | { readonly kind: "Wildcard"; readonly token: Token }
   | { readonly kind: "Grouping"; readonly expr: Expr }
   | { readonly kind: "ListLit"; readonly elements: readonly Expr[]; readonly token: Token }
+  | { readonly kind: "ListDynamicLit"; readonly start: Expr; readonly end: Expr; readonly step?: Expr }
   | { readonly kind: "VectorLit"; readonly elements: readonly Expr[]; readonly token: Token }
   | {
     readonly kind: "MatrixLit";
@@ -59,4 +61,7 @@ export type Expr =
   // Control flow & block expressions
   | { readonly kind: "Block"; readonly statements: readonly Stmt[]; readonly returnExpr?: Expr; readonly token: Token }
   | { readonly kind: "If"; readonly condition: Expr; readonly success: Expr; readonly fail?: Expr }
+  | { readonly kind: "While"; readonly condition: Expr; readonly block: Expr }
+  | { readonly kind: "For"; readonly identifier: Token; readonly expr: Expr; readonly block: Expr }
+  | { readonly kind: "Match"; readonly expr: Expr; readonly arms: readonly { readonly patterns: readonly Expr[]; readonly success: Expr }[] }
   ;
