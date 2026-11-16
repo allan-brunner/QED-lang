@@ -7,6 +7,8 @@
     "qed": "./dist/cli.js"
   },
   "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "build:cli": "esbuild src/cli/index.ts --bundle --format=esm --platform=node --banner:js=\"#!/usr/bin/env node\" --outfile=dist/cli.js",
     "build:web": "esbuild src/web/index.ts --bundle --format=esm --platform=browser --outfile=dist/qed.browser.js",
@@ -16,5 +18,11 @@
     "@types/node": "^26.6.6",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  },
+  "devDependencies": {
+    "vitest": "^5.1.0"
   }
 }
