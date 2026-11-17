@@ -160,18 +160,8 @@ function scan(state: LexerState): TailCall<Token[]> {
       }
       return tailCall(() => scan(emit(state, TokenType.EQUAL, "=")));
     case "<":
-      if (nextCh === "<") {
-        return tailCall(() => scan(emit(state, TokenType.LESS_LESS, "<<")));
-      } else if (nextCh === "=") {
-        return tailCall(() => scan(emit(state, TokenType.LESS_EQUAL, "<=")));
-      }
       return tailCall(() => scan(emit(state, TokenType.LESS, "<")));
     case ">":
-      if (nextCh === ">") {
-        return tailCall(() => scan(emit(state, TokenType.GREATER_GREATER, ">>")));
-      } else if (nextCh === "=") {
-        return tailCall(() => scan(emit(state, TokenType.GREATER_EQUAL, ">=")));
-      }
       return tailCall(() => scan(emit(state, TokenType.GREATER, ">")));
 
     case "/":

@@ -1,22 +1,13 @@
 import { Token, TokenType } from "./token.js";
 
 export type TypeNode =
-  | { readonly kind: "NamedType"; readonly name: string; readonly optional: boolean }
+  | { readonly kind: "NamedType"; readonly name: Token; readonly typeParams?: readonly TypeNode[]; readonly optional: boolean }
+  | { readonly kind: "FuncType"; readonly params: readonly TypeNode[]; readonly returnType: TypeNode; readonly optional: boolean }
   ;
 
 export type Stmt =
-  | {
-    readonly kind: "VarDecl";
-    readonly isConst: boolean;
-    readonly name: Token;
-    readonly typeAnnotation?: TypeNode;
-    readonly initializer: Expr;
-  }
-  | {
-    readonly kind: "ExprStmt";
-    readonly expr: Expr;
-    readonly value?: Expr;
-  }
+  | { readonly kind: "VarDecl"; readonly isConst: boolean; readonly name: Token; readonly typeAnnotation?: TypeNode; readonly initializer: Expr; }
+  | { readonly kind: "ExprStmt"; readonly expr: Expr; readonly value?: Expr; }
   ;
 
 export type Expr =
@@ -33,19 +24,9 @@ export type Expr =
   | { readonly kind: "ListLit"; readonly elements: readonly Expr[]; readonly token: Token }
   | { readonly kind: "ListDynamicLit"; readonly start: Expr; readonly end: Expr; readonly step?: Expr }
   | { readonly kind: "VectorLit"; readonly elements: readonly Expr[]; readonly token: Token }
-  | {
-    readonly kind: "MatrixLit";
-    readonly cells: readonly Expr[];
-    readonly nbRows: number;
-    readonly nbCols: number;
-    readonly token: Token;
-  }
+  | { readonly kind: "MatrixLit"; readonly cells: readonly Expr[]; readonly nbRows: number; readonly nbCols: number; readonly token: Token; }
   | { readonly kind: "SetLit"; readonly elements: readonly Expr[]; readonly token: Token }
-  | {
-    readonly kind: "MapLit";
-    readonly entries: readonly { readonly key: Expr; readonly value: Expr }[];
-    readonly token: Token;
-  }
+  | { readonly kind: "MapLit"; readonly entries: readonly { readonly key: Expr; readonly value: Expr }[]; readonly token: Token; }
 
   // Postfix expressions
   | { readonly kind: "PostfixUnary"; readonly operator: Token; readonly operand: Expr }
