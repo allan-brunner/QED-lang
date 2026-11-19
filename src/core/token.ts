@@ -14,7 +14,6 @@ export enum TokenType {
   UNDERLINE = "UNDERLINE",         // _
 
   // Multi-character delimiters & arrows
-  AT_BRACKET = "AT_BRACKET",       // @[
   THIN_ARROW = "THIN_ARROW",       // ->
   FAT_ARROW = "FAT_ARROW",         // =>
 
@@ -54,7 +53,6 @@ export enum TokenType {
   INTER = "INTER",                 // inter
   UNION = "UNION",                 // union
   IN = "IN",                       // in
-  NOT = "NOT",                     // not
 
   // Declaration & control-flow keywords
   IMPORT = "IMPORT",
@@ -120,7 +118,6 @@ export const KEYWORDS: Readonly<Record<string, TokenType>> = {
   inter: TokenType.INTER,
   union: TokenType.UNION,
   in: TokenType.IN,
-  not: TokenType.NOT,
 
   // Keywords
   import: TokenType.IMPORT,

@@ -60,6 +60,11 @@ describe("Lexer - Operators & Delimiters", () => {
     ]);
   });
 
+  it("handles empty and whitespace-only input (including CRLF)", () => {
+    expect(typesOf("")).toEqual([TokenType.EOF]);
+    expect(typesOf("   \t\r\n\r\n  ")).toEqual([TokenType.EOF]);
+  });
+
   it("handles factorial followed by equality without ambiguity (5! == 120)", () => {
     expect(typesOf("5! == 120")).toEqual([
       TokenType.INT_LIT,
@@ -150,12 +155,14 @@ describe("Lexer - Keywords, Built-in Types & Identifiers", () => {
 
 describe("Lexer - Numbers, Complex Literals & Parameterless Methods", () => {
   it("tokenizes integers, floats, scientific notation, and complex literals", () => {
-    const tokens = tokenize("42 3.14 1.5e-10 2E+5 4i 2.5i 1e3i");
+    const tokens = tokenize("0 42 3.14 1.5e-10 2E+5 1e3 4i 2.5i 1e3i");
     expect(tokens.map((t) => [t.type, t.lexeme])).toEqual([
+      [TokenType.INT_LIT, "0"],
       [TokenType.INT_LIT, "42"],
       [TokenType.FLOAT_LIT, "3.14"],
       [TokenType.FLOAT_LIT, "1.5e-10"],
       [TokenType.FLOAT_LIT, "2E+5"],
+      [TokenType.FLOAT_LIT, "1e3"],
       [TokenType.COMPLEX_LIT, "4i"],
       [TokenType.COMPLEX_LIT, "2.5i"],
       [TokenType.COMPLEX_LIT, "1e3i"],
@@ -181,14 +188,46 @@ describe("Lexer - Numbers, Complex Literals & Parameterless Methods", () => {
       [TokenType.EOF, ""],
     ]);
   });
+
+  it("handles implicit-multiplication boundaries (4i2, 3e, 2epsilon) and escaped newlines in strings", () => {
+    expect(tokenize("4i2").map((t) => [t.type, t.lexeme])).toEqual([
+      [TokenType.INT_LIT, "4"],
+      [TokenType.IDENT, "i2"],
+      [TokenType.EOF, ""],
+    ]);
+
+    expect(tokenize("3e 2epsilon").map((t) => [t.type, t.lexeme])).toEqual([
+      [TokenType.INT_LIT, "3"],
+      [TokenType.IDENT, "e"],
+      [TokenType.INT_LIT, "2"],
+      [TokenType.IDENT, "epsilon"],
+      [TokenType.EOF, ""],
+    ]);
+
+    const escapedNl = tokenize('"a\\\nb" x');
+    expect(escapedNl[1]).toMatchObject({ lexeme: "x", line: 2, column: 4 });
+  });
 });
 
-describe("Lexer - Strings, Comments & Error Handling", () => {
-  it("tokenizes strings and preserves escaped quotes", () => {
+describe("Lexer - Strings, Comments, Positions & Error Handling", () => {
+  it("tokenizes strings and preserves escaped quotes and multiline coordinates", () => {
     const tokens = tokenize('let s = "hello \\"world\\"";');
     expect(tokens[3].type).toBe(TokenType.STRING_LIT);
     expect(tokens[3].lexeme).toBe('"hello \\"world\\""');
     expect(tokens[4].type).toBe(TokenType.SEMICOLON);
+
+    const multiline = tokenize('"line1\nline2" x');
+    expect(multiline[0]).toMatchObject({ type: TokenType.STRING_LIT, line: 1, column: 1 });
+    expect(multiline[1]).toMatchObject({ type: TokenType.IDENT, lexeme: "x", line: 2, column: 8 });
+  });
+
+  it("tracks exact line and column numbers across newlines and block comments", () => {
+    const code = "let a = 1;\n/* multi\nline */ let b = 2;";
+    const tokens = tokenize(code);
+    expect(tokens[0]).toMatchObject({ lexeme: "let", line: 1, column: 1 });
+    expect(tokens[4]).toMatchObject({ lexeme: ";", line: 1, column: 10 });
+    expect(tokens[5]).toMatchObject({ lexeme: "let", line: 3, column: 9 });
+    expect(tokens[6]).toMatchObject({ lexeme: "b", line: 3, column: 13 });
   });
 
   it("ignores // line comments and nested /* */ block comments", () => {
@@ -221,5 +260,6 @@ describe("Lexer - Strings, Comments & Error Handling", () => {
     expect(() => tokenize("/* unclosed /* nested */")).toThrow(/Unclosed block comment starting at 1:1/);
     expect(() => tokenize("1.5e+")).toThrow(/Invalid scientific/);
     expect(() => tokenize("$invalid")).toThrow(/Unexpected character '\$'/);
+    expect(() => tokenize("@foo")).toThrow(/Unexpected character '@'/);
   });
 });

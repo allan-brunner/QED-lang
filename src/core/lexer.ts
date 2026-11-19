@@ -109,12 +109,6 @@ function scan(state: LexerState): TailCall<Token[]> {
       return tailCall(() => scan(emit(state, TokenType.CARET, "^")));
 
     // Multi-characters
-    case "@":
-      if (nextCh === "[") {
-        return tailCall(() => scan(emit(state, TokenType.AT_BRACKET, "@[")));
-      }
-      throw new Error(`Unexpected '@' at ${line}:${col}`);
-
     case "-":
       return tailCall(() =>
         nextCh === ">"
@@ -238,11 +232,26 @@ function readString(state: LexerState): LexerState {
   let col = state.col + 1;
 
   while (i < state.source.length && state.source[i] !== "\"") {
-    if (state.source[i] == "\\") {
-      i += 2;
-      col += 2;
+    if (state.source[i] === "\\") {
+      const next = state.source[i + 1];
+      if (next === undefined) {
+        break;
+      }
+      if (next === "\n") {
+        line++;
+        col = 1;
+        i += 2;
+      } else if (next === "\r" && state.source[i + 2] === "\n") {
+        line++;
+        col = 1;
+        i += 3;
+      } else {
+        i += 2;
+        col += 2;
+      }
       continue;
     }
+
     if (state.source[i] === "\n") {
       line++;
       col = 1;
@@ -293,6 +302,10 @@ function skipBlockComment(state: LexerState): LexerState {
   return { ...state, index: i, line, col };
 }
 
+function isIdentifierPart(ch: string): boolean {
+  return /^[a-zA-Z0-9_\u0370-\u03FF]$/.test(ch);
+}
+
 function readNumber(state: LexerState): LexerState {
   let i = state.index;
   let isFloat = false;
@@ -310,20 +323,24 @@ function readNumber(state: LexerState): LexerState {
   }
 
   if (state.source[i] === "e" || state.source[i] === "E") {
-    isFloat = true;
-    i++;
-    if (state.source[i] === "+" || state.source[i] === "-") {
+    const afterE = state.source[i + 1] ?? "";
+    const afterSign = state.source[i + 2] ?? "";
+    const hasExpDigits =
+      isDigit(afterE) || ((afterE === "+" || afterE === "-") && isDigit(afterSign));
+
+    if (hasExpDigits) {
+      isFloat = true;
       i++;
-    }
-    if (!isDigit(state.source[i] ?? "")) {
-      throw new Error(`Invalid scientific notifation at ${state.line}:${state.col}`);
-    }
-    while (i < state.source.length && isDigit(state.source[i])) {
-      i++;
+      if (afterE === "+" || afterE === "-") i++;
+      while (i < state.source.length && isDigit(state.source[i])) {
+        i++;
+      }
+    } else if ((afterE === "+" || afterE === "-") && !isIdentifierStart(afterSign)) {
+      throw new Error(`Invalid scientific notation at ${state.line}:${state.col}`);
     }
   }
 
-  if (state.source[i] === "i" && !isIdentifierStart(state.source[i + 1] ?? "")) {
+  if (state.source[i] === "i" && !isIdentifierPart(state.source[i + 1] ?? "")) {
     i++;
     const lexeme = state.source.slice(state.index, i);
     return emit(state, TokenType.COMPLEX_LIT, lexeme);

@@ -1,143 +1,141 @@
-## Program & top-level declarations
+## Program & statements
 ```ebnf
-Program        = { Statement } ;
+Program        = { Statement } EOF ;
 
-ImportDecl     = "import" STRING ";" ;
-
-ClassDecl      = { DOC_COMMENT } "class" IDENT [ "inherits" IDENT ] "{" { MemberDecl } "}" ;
-MemberDecl     = VarDecl | FuncDecl ;
-
-FuncDecl       = { DOC_COMMENT } "func" IDENT [ ParamClause ] [ ":" Type ] Block ;
-ParamClause    = "(" [ ParamList ] ")" ;
-ParamList      = Param { "," Param } ;
-Param          = IDENT ":" Type ;
-
-VarDecl        = ( "let" | "const" ) IDENT [ ":" Type ] "=" Expr ";" ;
-```
-## Statements & control flow
-```ebnf
-Statement      = ImportDecl
+Statement      = VarDecl
+               | ImportDecl
                | ClassDecl
                | FuncDecl
-               | VarDecl
-               | IfStmt
-               | WhileStmt
-               | ForStmt
-               | ReturnStmt
+               | ContinueStmt
                | BreakStmt
-               | "continue" ";"
-               | ControlFlowExpr
-               | AssignOrExprStmt
-               | Block ;
+               | ReturnStmt
+               | ExprStmt ;
 
-Block          = "{" { Statement } [ Expr ] "}" ;
+ImportDecl     = "import" STRING_LIT ";" ;
 
-ReturnStmt     = ("return" [ Expr ] ";") | Expr ;
+ClassDecl      = "class" IDENT [ "inherits" IDENT ] "{" { ClassMember } "}" ;
+ClassMember    = VarDecl | FuncDecl ;
+
+FuncDecl       = "func" IDENT [ "(" [ FuncParam { "," FuncParam } ] ")" ]
+                 [ ":" Type ]
+                 ( Block | "=>" Expr ";" ) ;
+FuncParam      = IDENT [ ":" Type ] ;
+
+VarDecl        = ( "let" | "const" ) IDENT [ ":" Type ] "=" Expr ";" ;
+
+ContinueStmt   = "continue" ";" ;
 BreakStmt      = "break" [ Expr ] ";" ;
-AssignOrExprStmt = Expr [ "=" Expr ] ";" ;
+ReturnStmt     = "return" [ Expr ] ";" ;
+
+(* Top-level ExprStmts require ";" unless block-ended or at EOF.
+   Inside a Block, the first semicolon-less non-block ExprStmt (or trailing
+   semicolon-less block-ended ExprStmt) becomes the block's implicit return;
+   any statements after a return/break/continue/implicit return are unreachable. *)
+ExprStmt       = Expr [ ";" ] ;
 ```
-## Expressions & operators precedence
-```ebnf
-Expr           = Ternary ;
-
-Ternary        = LogicOr [ "?" Expr ":" Ternary ] ;
-LogicOr        = LogicAnd { "||" LogicAnd } ;
-LogicAnd       = LogicNot { "&&" LogicNot } ;
-LogicNot       = "!" LogicNot | Comparison ;
-
-Comparison     = BitOr [ CompOp BitOr ] ;
-CompOp         = "==" | "!=" | "~=" | "<" | ">" | "<=" | ">=" | "in" ;
-
-BitOr          = BitXor { "|" BitXor } ;
-BitXor         = BitAnd { "^" BitAnd } ;
-BitAnd         = BitShift { "&" BitShift } ;
-BitShift       = Additive { ( "<<" | ">>" ) Additive } ;
-
-Additive       = Multiplicative { ( "+" | "-" | "union" | "\" ) Multiplicative } ;
-Multiplicative = Unary { ( "*" | "/" | "div" | "%" | "cross" | "inter" ) Unary } ;
-
-Unary          = ( "-" | "~" ) Unary | Power ;
-Power          = Postfix [ "**" Unary ] ;
-```
-## Postfix, slicing, calls & member access
-```ebnf
-Postfix        = Primary { PostfixOp } ;
-PostfixOp      = "!"                                  (* Factorial *)
-               | "(" [ ArgList ] ")"                  (* Function / method call *)
-               | "[" IndexOrSlice "]"                 (* Indexing & slicing *)
-               | "." IDENT ;                          (* Property or parameterless method *)
-
-ArgList        = Expr { "," Expr } ;
-
-IndexOrSlice   = Expr ":" [ Expr ]                    (* Slice: a[0:5] or a[2:] *)
-               | ":" Expr                             (* Slice: a[:5] *)
-               | Expr { "," Expr } ;                  (* 1D index a[i] or 2D matrix a[r, c] *)
-```
-## Primary expressions & literals
-```ebnf
-Primary        = INT_LIT
-               | FLOAT_LIT
-               | COMPLEX_LIT
-               | STRING
-               | "true" | "false" | "None" | "this"
-               | IDENT
-               | "(" Expr ")"
-               | ControlFlowExpr
-		       | LambdaExpr
-               | ListLit
-               | VecMatLit
-               | MapOrSetLit ;
-
-ControlFlowExpr = IfExpr 
-                | WhileExpr 
-				| ForExpr 
-				| MatchExpr ;
-
-IfExpr         = "if" Expr Block [ "else" ( IfExpr | Block ) ] ;
-WhileExpr      = "while" Expr Block ;
-ForExpr        = "for" ( IDENT "in" Expr | "(" IDENT "in" Expr ")" ) Block ;
-
-MatchExpr      = "match" Expr "{" { MatchArm } "}" ;
-MatchArm       = Pattern { "|" Pattern } "=>" ( Block [ "," ] | Expr "," ) ;
-Pattern        = "_"
-               | "None" | "true" | "false"
-               | [ "-" ] ( INT_LIT | FLOAT_LIT )
-               | STRING
-               | IDENT ;
-
-LambdaExpr     = "func" "(" [ ParamList ] ")" [ ":" Type ] Block ;
-
-ListLit        = "[" [ ArgList ] "]" ;
-
-VecMatLit      = "@[" [ Row { ";" Row } ] "]" ;       (* 1 row = vector, 2+ rows = matrix *)
-Row            = Expr { "," Expr } ;
-
-MapOrSetLit    = "{" [ CollectionBody ] "}" ;
-CollectionBody = Expr ":" Expr { "," Expr ":" Expr }  (* Map: { "a": 1, "b": 2 } *)
-               | Expr { "," Expr } ;                  (* Set: { 1, 2, 3 } *)
-```
-## Type annotation
+## Type annotations
 ```ebnf
 Type           = BaseType [ "?" ] ;
 
-BaseType       = "None" | "Boolean" | "Int" | "BigInt" | "Float" | "Double"
-               | "String" | "Vector" | "Matrix" | "Imaginary"
-               | ( "List" | "Set" | "Deque" | "Heap" ) [ "[" Type "]" ]
-               | "Map" [ "[" Type "," Type "]" ]
-               | "(" [ Type { "," Type } ] ")" "->" Type
+BaseType       = "(" [ Type { "," Type } ] ")" "->" Type
+               | "(" Type ")"
+               | "Map" [ "<" Type "," Type ">" ]
+               | ( "List" | "Set" | "Deque" | "Heap" ) [ "<" Type ">" ]
+               | PrimitiveType
+               | "None"
                | IDENT ;
-```
-## Lexical tokens
-```ebnf
-DOC_COMMENT      = "///" { ANY_CHAR_EXCEPT_NEWLINE } NEWLINE ;
-LINE_COMMENT     = "//" { ANY_CHAR_EXCEPT_NEWLINE } NEWLINE ;
-BLOCK_COMMENT    = "/*" { ANY_CHAR | BLOCK_COMMENT } "*/" ;
 
-IDENT          = LETTER { LETTER | DIGIT | "_" } ;
+PrimitiveType  = "Boolean" | "Int" | "BigInt" | "Float" | "Double"
+               | "String" | "Vector" | "Matrix" | "Complex" ;
+```
+## Expressions & operators precedence
+```ebnf
+Expr           = Assign ;
+
+Assign         = Ternary [ "=" Assign ] ;
+Ternary        = LogicOr [ "?" Expr ":" Ternary ] ;
+
+LogicOr        = LogicAnd      { "||" LogicAnd } ;
+LogicAnd       = Equality      { "&&" Equality } ;
+Equality       = Order         { ( "==" | "!=" | "~=" ) Order } ;
+Order          = BitwiseOr     { ( "<" | ">" | "<=" | ">=" | "in" ) BitwiseOr } ;
+BitwiseOr      = BitwiseXor    { "|" BitwiseXor } ;
+BitwiseXor     = BitwiseAnd    { "^" BitwiseAnd } ;
+BitwiseAnd     = Shift         { "&" Shift } ;
+Shift          = Additive      { ( "<<" | ">>" ) Additive } ;
+Additive       = Multiplicative { ( "+" | "-" | "union" | "\" ) Multiplicative } ;
+Multiplicative = Unary         { ( "*" | "/" | "div" | "%" | "cross" | "inter" ) Unary } ;
+
+Unary          = ( "+" | "-" | "!" | "~" ) Unary
+               | ImplicitMul ;
+
+ImplicitMul    = Power         [ (* adjacent, when LHS is NumberLit *) Power ] ;
+Power          = Postfix       [ "**" Unary ] ;
+
+Postfix        = Primary { PostfixOp } ;
+PostfixOp      = "!"
+               | "." IDENT
+               | "(" [ Expr { "," Expr } ] ")"          (* not on NumberLit *)
+               | "[" [ Expr ] ":" [ Expr ] "]"          (* slice *)
+               | "[" Expr { "," Expr } "]" ;            (* 1D / 2D index *)
+```
+## Primary, collection & control-flow expressions
+```ebnf
+Primary        = INT_LIT | FLOAT_LIT | COMPLEX_LIT | STRING_LIT
+               | "true" | "false" | "None" | "this" | "_" | IDENT
+               | "(" Expr ")"
+               | IfExpr
+               | WhileExpr
+               | ForExpr
+               | MatchExpr
+               | ListExpr
+               | VecMatExpr
+               | BraceExpr ;
+
+Body           = Block | "=>" Expr ;
+
+IfExpr         = "if" Expr Body [ "else" ( IfExpr | Body ) ] ;
+WhileExpr      = "while" Expr Body ;
+ForExpr        = "for" ( IDENT | "_" ) "in" Expr Body ;
+
+MatchExpr      = "match" Expr "{" [ MatchArm { "," MatchArm } [ "," ] ] "}" ;
+MatchArm       = MatchPattern { "|" MatchPattern } "=>" ( Block | Expr ) ;
+MatchPattern   = [ "+" | "-" ] Primary ;
+
+(* Lists & dynamic ranges *)
+ListExpr       = "[" [ Expr ( ( "to" | "until" ) Expr [ "by" Expr ]
+                            | { "," Expr } ) ] "]" ;
+
+(* Vectors (1 row) & rectangular matrices (2+ rows); cells start at Additive *)
+VecMatExpr     = "<" [ VecRow { ";" VecRow } ] ">" ;
+VecRow         = Additive { "," Additive } ;
+
+(* Context-driven braces:
+   - "{}" is an empty Block (resolved as empty Map/Set in type checker when expected)
+   - Statement keyword starter -> Block
+   - First Expr followed by ":" -> MapLit
+   - First Expr followed by "," or "}" -> SetLit
+   - Otherwise -> Block starting with that ExprStmt *)
+BraceExpr      = Block | MapLit | SetLit ;
+Block          = "{" { Statement } "}" ;
+MapLit         = "{" Expr ":" Expr { "," Expr ":" Expr } "}" ;
+SetLit         = "{" Expr { "," Expr } "}" ;
+```
+## Lexical specification
+```ebnf
 INT_LIT        = DIGIT { DIGIT } ;
-FLOAT_LIT      = DIGIT { DIGIT } "." DIGIT { DIGIT } [ ( "e" | "E" ) [ "+" | "-" ] DIGIT { DIGIT } ] ;
-COMPLEX_LIT    = ( INT_LIT | FLOAT_LIT ) "i" ;
-STRING         = '"' { ANY_CHAR_EXCEPT_QUOTE | '\"' } '"' ;
-LETTER         = "a".."z" | "A".."Z" | GREEK_UNICODE ;
-DIGIT          = "0".."9" ;
+FLOAT_LIT      = DIGIT { DIGIT } "." DIGIT { DIGIT } [ EXPONENT ]
+               | DIGIT { DIGIT } EXPONENT ;
+COMPLEX_LIT    = ( INT_LIT | FLOAT_LIT ) "i" (* not followed by IDENT_PART *) ;
+EXPONENT       = ( "e" | "E" ) [ "+" | "-" ] DIGIT { DIGIT } ;
+
+STRING_LIT     = '"' { CHAR | '\"' | '\\' | '\n' | '\r' | '\t' | '\0' | '\' NEWLINE } '"' ;
+
+IDENT          = IDENT_START { IDENT_PART } ;   (* excluding reserved keywords *)
+IDENT_START    = [a-zA-Z_] | [\u0370-\u03FF] ;  (* ASCII + Greek block *)
+IDENT_PART     = IDENT_START | DIGIT ;
+
+(* Angle brackets "<" and ">" are always emitted as single tokens.
+   "///" lines attach as docComment to the next emitted token, but only docComment on classes and function declaration are retained;
+   "//" line comments and arbitrarily nested "/* ... */" block comments are skipped. *)
 ```
