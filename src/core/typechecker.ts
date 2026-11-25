@@ -1,7 +1,7 @@
 import { Expr, Stmt, TypeNode } from "./ast.js";
 import { Token, TokenType } from "./token.js";
 import { Scope } from "./scope.js";
-import { Type, Types, isAssignable, optionalOf, typeToString } from "./types.js";
+import { Type, Types, isAssignable, isInteger, isNumeric, isOrderedNumeric, optionalOf, promoteInteger, promoteNumeric, typeEquals, typeToString } from "./types.js";
 
 export class TypeError extends Error {
     constructor(message: string, public readonly token?: Token) {
@@ -66,6 +66,203 @@ export class TypeChecker {
         return resolved;
     }
 
+    private checkBinary(op: Token, left: Type, right: Type): Type {
+        const fail = (): never => {
+            throw new TypeError(
+                `Operator '${op.lexeme}' cannot be applied to '${typeToString(left)}' and '${typeToString(right)}'.`,
+                op
+            );
+        };
+
+        switch (op.type) {
+            // Additive: numbers, vectors, matrices, string concat
+            case TokenType.PLUS:
+            case TokenType.MINUS: {
+                const num = promoteNumeric(left, right);
+                if (num) return num;
+
+                if (left.kind === "Vector" && right.kind === "Vector") {
+                    return { kind: "Vector", element: promoteNumeric(left.element, right.element)! };
+                }
+                if (left.kind === "Matrix" && right.kind === "Matrix") {
+                    return { kind: "Matrix", element: promoteNumeric(left.element, right.element)! };
+                }
+                if (
+                    op.type === TokenType.PLUS &&
+                    left.kind === "Primitive" && left.name === "String" &&
+                    right.kind === "Primitive" && right.name === "String"
+                ) {
+                    return Types.String;
+                }
+                return fail();
+            }
+
+            // Multiplicative: numbers, scalar*vec/mat, mat*vec, mat*mat, dot product
+            case TokenType.STAR: {
+                const num = promoteNumeric(left, right);
+                if (num) return num;
+
+                if (isNumeric(left) && right.kind === "Vector") {
+                    return { kind: "Vector", element: promoteNumeric(left, right.element)! };
+                }
+                if (left.kind === "Vector" && isNumeric(right)) {
+                    return { kind: "Vector", element: promoteNumeric(left.element, right)! };
+                }
+                if (isNumeric(left) && right.kind === "Matrix") {
+                    return { kind: "Matrix", element: promoteNumeric(left, right.element)! };
+                }
+                if (left.kind === "Matrix" && isNumeric(right)) {
+                    return { kind: "Matrix", element: promoteNumeric(left.element, right)! };
+                }
+                if (left.kind === "Matrix" && right.kind === "Vector") {
+                    return { kind: "Vector", element: promoteNumeric(left.element, right.element)! };
+                }
+                if (left.kind === "Vector" && right.kind === "Matrix") {
+                    return { kind: "Vector", element: promoteNumeric(left.element, right.element)! };
+                }
+                if (left.kind === "Matrix" && right.kind === "Matrix") {
+                    return { kind: "Matrix", element: promoteNumeric(left.element, right.element)! };
+                }
+                if (left.kind === "Vector" && right.kind === "Vector") {
+                    return promoteNumeric(left.element, right.element)!;
+                }
+                return fail();
+            }
+
+            // True division
+            case TokenType.SLASH: {
+                const num = promoteNumeric(left, right);
+                if (num) return isInteger(num) ? Types.Double : num;
+
+                if (left.kind === "Vector" && isNumeric(right)) {
+                    const elem = promoteNumeric(left.element, right)!;
+                    return { kind: "Vector", element: isInteger(elem) ? Types.Double : elem };
+                }
+                if (left.kind === "Matrix" && isNumeric(right)) {
+                    const elem = promoteNumeric(left.element, right)!;
+                    return { kind: "Matrix", element: isInteger(elem) ? Types.Double : elem };
+                }
+                return fail();
+            }
+
+            // Power: numbers and Matrix ** Int
+            case TokenType.STAR_STAR: {
+                const num = promoteNumeric(left, right);
+                if (num) return num;
+                if (left.kind === "Matrix" && isInteger(right)) {
+                    return left;
+                }
+                return fail();
+            }
+
+            // Integer-only arithmetic & bitwise
+            case TokenType.DIV:
+            case TokenType.PERCENT:
+            case TokenType.AMP:
+            case TokenType.PIPE:
+            case TokenType.CARET:
+            case TokenType.LESS_LESS:
+            case TokenType.GREATER_GREATER:
+                return promoteInteger(left, right) ?? fail();
+
+            // Vector cross product
+            case TokenType.CROSS: {
+                if (left.kind === "Vector" && right.kind === "Vector") {
+                    return { kind: "Vector", element: promoteNumeric(left.element, right.element)! };
+                }
+                return fail();
+            }
+
+            // Set algebra
+            case TokenType.UNION:
+            case TokenType.INTER:
+            case TokenType.BACKSLASH:
+                if (left.kind === "Set" && right.kind === "Set" && typeEquals(left.element, right.element)) {
+                    return left;
+                }
+                return fail();
+
+            // Ordering
+            case TokenType.LESS:
+            case TokenType.LESS_EQUAL:
+            case TokenType.GREATER:
+            case TokenType.GREATER_EQUAL:
+                if (isOrderedNumeric(left) && isOrderedNumeric(right)) return Types.Boolean;
+                if (
+                    left.kind === "Primitive" && left.name === "String" &&
+                    right.kind === "Primitive" && right.name === "String"
+                ) {
+                    return Types.Boolean;
+                }
+                return fail();
+
+            // Approximate equality (~=)
+            case TokenType.TILDE_EQUAL:
+                if (
+                    (isNumeric(left) && isNumeric(right)) ||
+                    (left.kind === "Vector" && right.kind === "Vector") ||
+                    (left.kind === "Matrix" && right.kind === "Matrix")
+                ) {
+                    return Types.Boolean;
+                }
+                return fail();
+
+            // Exact equality
+            case TokenType.EQUAL_EQUAL:
+            case TokenType.BANG_EQUAL:
+                if (
+                    promoteNumeric(left, right) ||
+                    (left.kind === "Vector" && right.kind === "Vector") ||
+                    (left.kind === "Matrix" && right.kind === "Matrix") ||
+                    isAssignable(left, right) ||
+                    isAssignable(right, left)
+                ) {
+                    return Types.Boolean;
+                }
+                return fail();
+
+            // Logical
+            case TokenType.AMP_AMP:
+            case TokenType.PIPE_PIPE:
+                if (isAssignable(left, Types.Boolean) && isAssignable(right, Types.Boolean)) {
+                    return Types.Boolean;
+                }
+                return fail();
+
+            // Membership (`in`)
+            case TokenType.IN:
+                if ((right.kind === "List" || right.kind === "Set") && isAssignable(left, right.element)) {
+                    return Types.Boolean;
+                }
+                if (right.kind === "Map" && isAssignable(left, right.key)) return Types.Boolean;
+                if (
+                    left.kind === "Primitive" && left.name === "String" &&
+                    right.kind === "Primitive" && right.name === "String"
+                ) {
+                    return Types.Boolean;
+                }
+                return fail();
+
+            default:
+                return fail();
+        }
+    }
+
+    private promoteNumericCells(cells: readonly Expr[], kind: "Vector" | "Matrix", token: Token): Type {
+        let acc: Type | undefined;
+        for (const cell of cells) {
+            const cellType = this.checkExpr(cell);
+            if (!isNumeric(cellType)) {
+                throw new TypeError(
+                    `${kind} elements must be numeric, got '${typeToString(cellType)}'.`,
+                    token
+                );
+            }
+            acc = acc ? promoteNumeric(acc, cellType)! : cellType;
+        }
+        return acc!;
+    }
+
     private inferExpr(expr: Expr, expected?: Type): Type {
         switch (expr.kind) {
             case "IntLit": return Types.Int;
@@ -75,6 +272,20 @@ export class TypeChecker {
             case "BooleanLit": return Types.Boolean;
             case "NoneLit": return Types.None;
             case "Grouping": return this.checkExpr(expr.expr, expected);
+
+            case "VectorLit": {
+                if (expr.elements.length === 0) {
+                    if (expected?.kind === "Vector") return expected;
+                    return { kind: "Vector", element: Types.Double };
+                }
+                const element = this.promoteNumericCells(expr.elements, "Vector", expr.token);
+                return { kind: "Vector", element };
+            }
+
+            case "MatrixLit": {
+                const element = this.promoteNumericCells(expr.cells, "Matrix", expr.token);
+                return { kind: "Matrix", element };
+            }
 
             case "Identifier": {
                 const entry = this.scope.lookup(expr.name);
@@ -109,30 +320,65 @@ export class TypeChecker {
             case "Binary": {
                 const left = this.checkExpr(expr.left);
                 const right = this.checkExpr(expr.right);
+                return this.checkBinary(expr.operator, left, right);
+            }
 
+            case "Unary": {
+                const operand = this.checkExpr(expr.operand);
                 switch (expr.operator.type) {
                     case TokenType.PLUS:
-                        if (isAssignable(left, Types.Int) && isAssignable(right, Types.Int)) return Types.Int;
-                        if (isAssignable(left, Types.Float) && isAssignable(right, Types.Float)) return Types.Float;
-                        if (isAssignable(left, Types.String) && isAssignable(right, Types.String)) return Types.String;
-                        throw new TypeError(
-                            `Operator '+' cannot be applied to '${typeToString(left)}' and '${typeToString(right)}'.`,
-                            expr.operator
-                        );
-
-                    case TokenType.EQUAL_EQUAL:
-                    case TokenType.BANG_EQUAL:
-                        if (!isAssignable(left, right) && !isAssignable(right, left)) {
-                            throw new TypeError(
-                                `Cannot compare '${typeToString(left)}' and '${typeToString(right)}'.`,
-                                expr.operator
-                            );
+                    case TokenType.MINUS:
+                        if (isNumeric(operand) || operand.kind === "Vector" || operand.kind === "Matrix") {
+                            return operand;
                         }
-                        return Types.Boolean;
-
-                    default:
-                        throw new TypeError(`Binary operator '${expr.operator.lexeme}' is not implemented yet.`, expr.operator);
+                        break;
+                    case TokenType.BANG:
+                        if (isAssignable(operand, Types.Boolean)) return Types.Boolean;
+                        break;
+                    case TokenType.TILDE:
+                        if (isInteger(operand)) return operand;
+                        break;
                 }
+                throw new TypeError(
+                    `Unary operator '${expr.operator.lexeme}' cannot be applied to '${typeToString(operand)}'.`,
+                    expr.operator
+                );
+            }
+
+            case "PostfixUnary": {
+                const operand = this.checkExpr(expr.operand);
+                if (expr.operator.type === TokenType.BANG && isInteger(operand)) {
+                    return operand;
+                }
+                throw new TypeError(
+                    `Postfix operator '${expr.operator.lexeme}' cannot be applied to '${typeToString(operand)}'.`,
+                    expr.operator
+                );
+            }
+
+            case "Index": {
+                const objType = this.checkExpr(expr.object);
+                const idxTypes = expr.indexes.map((i) => this.checkExpr(i));
+
+                if (objType.kind === "Vector") {
+                    if (idxTypes.length !== 1 || !isInteger(idxTypes[0])) {
+                        throw new TypeError("Vector indexing requires a single integer index.", expr.token);
+                    }
+                    return objType.element;
+                }
+
+                if (objType.kind === "Matrix") {
+                    if (idxTypes.length === 1 && isInteger(idxTypes[0])) {
+                        return { kind: "Vector", element: objType.element };
+                    }
+                    if (idxTypes.length === 2 && isInteger(idxTypes[0]) && isInteger(idxTypes[1])) {
+                        return objType.element;
+                    }
+                    throw new TypeError("Matrix indexing requires 1 or 2 integer indexes.", expr.token);
+                }
+
+                // TODO: List, Map, String indexing
+                throw new TypeError(`Cannot index into type '${typeToString(objType)}'.`, expr.token);
             }
 
             case "Block": {
@@ -202,8 +448,25 @@ export class TypeChecker {
                 case TokenType.TYPE_BOOLEAN: base = Types.Boolean; break;
                 case TokenType.TYPE_STRING: base = Types.String; break;
                 case TokenType.NONE: base = Types.None; break;
-                case TokenType.TYPE_VECTOR: base = { kind: "Vector" }; break;
-                case TokenType.TYPE_MATRIX: base = { kind: "Matrix" }; break;
+                case TokenType.TYPE_VECTOR:
+                case TokenType.TYPE_MATRIX: {
+                    const kind = node.name.type === TokenType.TYPE_VECTOR ? "Vector" : "Matrix";
+                    if (params.length === 0) {
+                        base = { kind, element: Types.Double };
+                    } else if (params.length === 1) {
+                        const elem = this.resolveTypeNode(params[0]);
+                        if (!isNumeric(elem)) {
+                            throw new TypeError(
+                                `${kind} element type must be numeric, got '${typeToString(elem)}'.`,
+                                node.name
+                            );
+                        }
+                        base = { kind, element: elem };
+                    } else {
+                        throw new TypeError(`${kind} takes at most 1 type parameter.`, node.name);
+                    }
+                    break;
+                }
 
                 case TokenType.TYPE_LIST:
                     if (params.length !== 1) throw new TypeError("List requires 1 type parameter.", node.name);

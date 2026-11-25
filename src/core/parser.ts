@@ -263,7 +263,7 @@ export class Parser {
     return this.match(
       TokenType.TYPE_BIGINT, TokenType.TYPE_INT, TokenType.TYPE_FLOAT,
       TokenType.TYPE_DOUBLE, TokenType.TYPE_COMPLEX, TokenType.TYPE_BOOLEAN,
-      TokenType.TYPE_STRING, TokenType.TYPE_VECTOR, TokenType.TYPE_MATRIX
+      TokenType.TYPE_STRING
     );
   }
 
@@ -301,7 +301,7 @@ export class Parser {
       return { kind: "NamedType", name, typeParams, optional: false };
     }
 
-    if (this.match(TokenType.TYPE_LIST, TokenType.TYPE_SET, TokenType.TYPE_DEQUE, TokenType.TYPE_HEAP)) {
+    if (this.match(TokenType.TYPE_LIST, TokenType.TYPE_SET, TokenType.TYPE_DEQUE, TokenType.TYPE_HEAP, TokenType.TYPE_VECTOR, TokenType.TYPE_MATRIX)) {
       const name = this.previous();
       let typeParams: TypeNode[] = [];
       if (this.match(TokenType.LESS)) {

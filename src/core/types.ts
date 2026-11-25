@@ -16,10 +16,30 @@ export type Type =
     | { readonly kind: "List"; readonly element: Type }
     | { readonly kind: "Set"; readonly element: Type }
     | { readonly kind: "Map"; readonly key: Type; readonly value: Type }
-    | { readonly kind: "Vector" }
-    | { readonly kind: "Matrix" }
+    | { readonly kind: "Vector"; readonly element: Type }
+    | { readonly kind: "Matrix"; readonly element: Type }
     | { readonly kind: "Function"; readonly params: readonly Type[]; readonly returnType: Type }
     | { readonly kind: "Class"; readonly name: string };
+
+const NUMERIC_RANK: Partial<Record<PrimitiveName, number>> = {
+    Int: 0,
+    BigInt: 1,
+    Float: 2,
+    Double: 3,
+    Complex: 4,
+};
+
+export function isNumeric(t: Type): boolean {
+    return t.kind === "Primitive" && NUMERIC_RANK[t.name] !== undefined;
+}
+
+export function isInteger(t: Type): boolean {
+    return t.kind === "Primitive" && (t.name === "Int" || t.name === "BigInt");
+}
+
+export function isOrderedNumeric(t: Type): boolean {
+    return isNumeric(t) && !(t.kind === "Primitive" && t.name === "Complex");
+}
 
 // Singleton helpers for common primitives
 export const Types = {
@@ -45,8 +65,8 @@ export function typeToString(t: Type): string {
         case "List": return `List<${typeToString(t.element)}>`;
         case "Set": return `Set<${typeToString(t.element)}>`;
         case "Map": return `Map<${typeToString(t.key)}, ${typeToString(t.value)}>`;
-        case "Vector": return "Vector";
-        case "Matrix": return "Matrix";
+        case "Vector": return `Vector<${typeToString(t.element)}>`;
+        case "Matrix": return `Matrix<${typeToString(t.element)}>`;
         case "Class": return t.name;
         case "Function":
             return `(${t.params.map(typeToString).join(", ")}) -> ${typeToString(t.returnType)}`;
@@ -65,7 +85,7 @@ export function typeEquals(a: Type, b: Type): boolean {
             return typeEquals(a.key, bm.key) && typeEquals(a.value, bm.value);
         }
         case "Vector":
-        case "Matrix": return true;
+        case "Matrix": return typeEquals(a.element, (b as typeof a).element);
         case "Class": return a.name === (b as typeof a).name;
         case "Function": {
             const bf = b as typeof a;
@@ -78,6 +98,32 @@ export function typeEquals(a: Type, b: Type): boolean {
     }
 }
 
+/**
+ * Returns the widened numeric type for any two numeric operands,
+ * or `undefined` if either operand is non-numeric.
+ */
+export function promoteNumeric(a: Type, b: Type): Type | undefined {
+    if (a.kind !== "Primitive" || b.kind !== "Primitive") return undefined;
+    const rankA = NUMERIC_RANK[a.name];
+    const rankB = NUMERIC_RANK[b.name];
+    if (rankA === undefined || rankB === undefined) return undefined;
+
+    // Preserve precision when mixing BigInt with 32-bit Float
+    if (
+        (a.name === "BigInt" && b.name === "Float") ||
+        (a.name === "Float" && b.name === "BigInt")
+    ) {
+        return Types.Double;
+    }
+
+    return rankA >= rankB ? a : b;
+}
+
+export function promoteInteger(a: Type, b: Type): Type | undefined {
+    if (!isInteger(a) || !isInteger(b)) return undefined;
+    return promoteNumeric(a, b);
+}
+
 export function isAssignable(source: Type, target: Type): boolean {
     if (source.kind === "Primitive" && source.name === "Never") return true;
     if (typeEquals(source, target)) return true;
@@ -88,7 +134,22 @@ export function isAssignable(source: Type, target: Type): boolean {
         return isAssignable(source, target.inner);
     }
 
-    // TODO: Add numeric widening (e.g., Int -> Float -> Double -> Complex)
-    // and class inheritance checks here later.
+    // Scalar numeric widening
+    if (source.kind === "Primitive" && target.kind === "Primitive") {
+        const rankS = NUMERIC_RANK[source.name];
+        const rankT = NUMERIC_RANK[target.name];
+        if (rankS !== undefined && rankT !== undefined && rankS <= rankT) {
+            return !(source.name === "BigInt" && target.name === "Float");
+        }
+    }
+
+    // Element-wise widening for Vectors & Matrices
+    if (source.kind === "Vector" && target.kind === "Vector") {
+        return isAssignable(source.element, target.element);
+    }
+    if (source.kind === "Matrix" && target.kind === "Matrix") {
+        return isAssignable(source.element, target.element);
+    }
+
     return false;
 }
