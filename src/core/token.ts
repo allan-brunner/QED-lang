@@ -111,7 +111,7 @@ export interface Token {
   readonly docComment?: string;
 }
 
-export const KEYWORDS: Readonly<Record<string, TokenType>> = {
+export const KEYWORDS: ReadonlyMap<string, TokenType> = new Map<string, TokenType>(Object.entries({
   // Word operators
   div: TokenType.DIV,
   cross: TokenType.CROSS,
@@ -158,4 +158,4 @@ export const KEYWORDS: Readonly<Record<string, TokenType>> = {
   Deque: TokenType.TYPE_DEQUE,
   Heap: TokenType.TYPE_HEAP,
   Map: TokenType.TYPE_MAP,
-};
+}));

@@ -1,13 +1,27 @@
 import { Expr, Stmt, TypeNode } from "./ast.js";
 import { Token, TokenType } from "./token.js";
-import { Scope } from "./scope.js";
+import { Scope, SymbolEntry } from "./scope.js";
 import { Type, Types, commonType, isAssignable, isInteger, isNumeric, isOrderedNumeric, optionalOf, promoteInteger, promoteNumeric, typeEquals, typeToString, unwrapOptional } from "./types.js";
+import { BUILTIN_MODULES, lookupBuiltinMember } from "./builtins.js";
 
 export class TypeError extends Error {
     constructor(message: string, public readonly token?: Token) {
         const loc = token ? ` at ${token.line}:${token.column}` : "";
         super(`Type error${loc}: ${message}`);
     }
+}
+
+export type ModuleLoader = (importPath: string) => readonly Stmt[] | undefined;
+
+interface ModuleExports {
+    readonly symbols: Map<string, SymbolEntry>;
+    readonly classes: Map<string, ClassInfo>;
+}
+
+export interface TypeCheckerOptions {
+    readonly moduleLoader?: ModuleLoader;
+    readonly moduleCache?: Map<string, ModuleExports>;
+    readonly loadingModules?: Set<string>;
 }
 
 interface LoopContext {
@@ -42,6 +56,11 @@ interface ClassInfo {
 export class TypeChecker {
     private scope = new Scope();
 
+    private readonly moduleLoader?: ModuleLoader;
+    private readonly moduleCache: Map<string, ModuleExports>;
+    private readonly loadingModules: Set<string>;
+    private readonly importedPaths = new Set<string>();
+
     private readonly loopStack: LoopContext[] = [];
     private readonly funcStack: FuncContext[] = [];
 
@@ -51,6 +70,12 @@ export class TypeChecker {
 
     public readonly exprTypes = new Map<Expr, Type>();
 
+    constructor(options: TypeCheckerOptions = {}) {
+        this.moduleLoader = options.moduleLoader;
+        this.moduleCache = options.moduleCache ?? new Map();
+        this.loadingModules = options.loadingModules ?? new Set();
+    }
+
     public checkProgram(stmts: readonly Stmt[]): void {
         this.hoistDeclarations(stmts);
         for (const stmt of stmts) {
@@ -59,6 +84,12 @@ export class TypeChecker {
     }
 
     private hoistDeclarations(stmts: readonly Stmt[]): void {
+        for (const stmt of stmts) {
+            if (stmt.kind === "ImportDecl") {
+                this.processImport(stmt);
+            }
+        }
+
         for (const stmt of stmts) {
             if (stmt.kind !== "ClassDecl") continue;
             const name = stmt.identifier.lexeme;
@@ -93,6 +124,87 @@ export class TypeChecker {
                 this.hoistFuncSignature(stmt);
             } else if (stmt.kind === "ClassDecl") {
                 this.hoistClassMembers(stmt);
+            }
+        }
+    }
+
+    private processImport(stmt: Extract<Stmt, { kind: "ImportDecl" }>): void {
+        const importPath = stmt.path.lexeme.slice(1, -1);
+
+        if (this.importedPaths.has(importPath)) return;
+        this.importedPaths.add(importPath);
+
+        const builtin = BUILTIN_MODULES.get(importPath);
+        if (builtin) {
+            for (const [name, entry] of builtin) {
+                const existing = this.scope.lookup(name);
+                if (existing && existing !== entry) {
+                    throw new TypeError(
+                        `Import '${importPath}' conflicts with existing symbol '${name}'.`,
+                        stmt.path
+                    );
+                }
+                if (!existing) {
+                    this.scope.define(name, entry);
+                }
+            }
+            return;
+        }
+
+        if (!this.moduleLoader) {
+            throw new TypeError(`Unknown module '${importPath}'.`, stmt.path);
+        }
+
+        if (this.loadingModules.has(importPath)) {
+            throw new TypeError(`Circular import detected involving '${importPath}'.`, stmt.path);
+        }
+
+        let exports = this.moduleCache.get(importPath);
+        if (!exports) {
+            const ast = this.moduleLoader(importPath);
+            if (!ast) {
+                throw new TypeError(`Cannot resolve module '${importPath}'.`, stmt.path);
+            }
+
+            this.loadingModules.add(importPath);
+            try {
+                const child = new TypeChecker({
+                    moduleLoader: this.moduleLoader,
+                    moduleCache: this.moduleCache,
+                    loadingModules: this.loadingModules,
+                });
+                child.checkProgram(ast);
+                exports = {
+                    symbols: new Map(child.scope.entries()),
+                    classes: new Map(child.classes),
+                };
+                this.moduleCache.set(importPath, exports);
+            } finally {
+                this.loadingModules.delete(importPath);
+            }
+        }
+
+        for (const [name, clsInfo] of exports.classes) {
+            const existing = this.classes.get(name);
+            if (existing && existing !== clsInfo) {
+                throw new TypeError(
+                    `Import '${importPath}' conflicts with existing class '${name}'.`,
+                    stmt.path
+                );
+            }
+            this.classes.set(name, clsInfo);
+        }
+
+        for (const [name, entry] of exports.symbols) {
+            const existing = this.scope.lookup(name);
+            if (existing && existing !== entry) {
+                throw new TypeError(
+                    `Import '${importPath}' conflicts with existing symbol '${name}'.`,
+                    stmt.path
+                );
+            }
+            if (!existing) {
+                this.scope.define(name, entry);
             }
         }
     }
@@ -295,8 +407,17 @@ export class TypeChecker {
                 return;
             }
 
-            default:
-                throw new TypeError(`Type checking for statement '${stmt.kind}' is not implemented yet.`);
+            case "ImportDecl": {
+                if (this.scope.parent !== undefined) {
+                    throw new TypeError("'import' statements are only allowed at the top level.", stmt.path);
+                }
+                return;
+            }
+
+            default: {
+                const _exhaustive: never = stmt;
+                throw new TypeError(`Unhandled statement kind: ${(_exhaustive as Stmt).kind}`);
+            }
         }
     }
 
@@ -620,20 +741,6 @@ export class TypeChecker {
         }
     }
 
-    private lookupBuiltinMember(objType: Type, name: string): Type | undefined {
-        if (isNumeric(objType)) {
-            if (name === "sqrt") return objType.kind === "Primitive" && objType.name === "Complex" ? Types.Complex : Types.Double;
-            if (name === "abs") return objType.kind === "Primitive" && objType.name === "Complex" ? Types.Double : objType;
-        }
-        if (objType.kind === "List" || objType.kind === "Set" || objType.kind === "Map" || objType.kind === "Vector") {
-            if (name === "len") return Types.Int;
-        }
-        if (objType.kind === "Primitive" && objType.name === "String") {
-            if (name === "len") return Types.Int;
-        }
-        return undefined;
-    }
-
     private promoteNumericCells(cells: readonly Expr[], kind: "Vector" | "Matrix", token: Token): Type {
         let acc: Type | undefined;
         for (const cell of cells) {
@@ -817,7 +924,7 @@ export class TypeChecker {
                     throw new TypeError(`Class '${objType.name}' has no field or method '${prop}'.`, expr.name);
                 }
 
-                const builtin = this.lookupBuiltinMember(objType, prop);
+                const builtin = lookupBuiltinMember(objType, prop);
                 if (builtin) return builtin;
 
                 throw new TypeError(`Type '${typeToString(objType)}' has no property or method '${prop}'.`, expr.name);

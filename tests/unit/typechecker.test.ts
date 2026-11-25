@@ -210,4 +210,91 @@ describe("TypeChecker - Base", () => {
         expect(() => check("class C { const k: Int = 1; } let c = C(); c.k = 2;")).toThrow(/constant field/);
         expect(() => check("let x = f(1); func f(a: Int) => a;")).toThrow(/explicit return type/);
     });
+
+    function checkWithModules(code: string, modules: Record<string, string>): TypeChecker {
+        const loader = (path: string) => {
+            const src = modules[path];
+            return src !== undefined ? new Parser(tokenize(src)).parseProgram() : undefined;
+        };
+        const program = new Parser(tokenize(code)).parseProgram();
+        const checker = new TypeChecker({ moduleLoader: loader });
+        checker.checkProgram(program);
+        return checker;
+    }
+
+    it("supports built-in module imports, user file imports, and built-in properties/methods", () => {
+        expect(() =>
+            check(`
+        import "math";
+        import "linalg";
+        import "io";
+
+        // Math module & widening (Int -> Double)
+        let angle: Double = sin(π / 2) + cos(0);
+        let g: Int = gcd(12, 18);
+
+        // Numeric & Complex properties
+        let s: Double = 9.sqrt;
+        let z = 3 + 4i;
+        let r: Double = z.re;
+        let mag: Double = z.abs;
+        let conj: Complex = z.conj;
+        let txt: String = 42.toString;
+
+        // Vector & Matrix properties/methods
+        let v = <3, 4>;
+        let n: Double = v.norm;
+        let u: Vector<Double> = v.unit;
+        let d: Double = v.dot(<1, 0>);
+        let id: Matrix<Double> = identity(3);
+        let inv: Matrix<Double> = id.T.inv;
+        let tr: Double = id.trace;
+
+        // Collections & Optional helpers
+        let xs = [1, 2, 3];
+        xs.push(4);
+        let top: Int? = xs.pop();
+        let safe: Int = top.unwrapOr(0);
+        let hasTwo: Boolean = xs.contains(2);
+
+        let m = {"a": 1};
+        let vOpt: Int? = m.get("a");
+        let ks: List<String> = m.keys;
+        println("done");
+    `)
+        ).not.toThrow();
+
+        // User module import + inheritance across files
+        expect(() =>
+            checkWithModules(
+                `
+        import "shapes";
+        class Circle inherits Shape {
+          let r: Double = 1.0;
+        }
+        let c = Circle();
+        let id: Int = c.getId();
+        let d: Double = scale(2.0);
+      `,
+                {
+                    shapes: `
+          class Shape {
+            let id: Int = 1;
+            func getId(): Int { return this.id; }
+          }
+          func scale(x: Double): Double => x * 2.0;
+        `,
+                }
+            )
+        ).not.toThrow();
+
+        // Rejections
+        expect(() => check('import "nonexistent";')).toThrow(/Unknown module/);
+        expect(() =>
+            checkWithModules('import "a";', { a: 'import "b";', b: 'import "a";' })
+        ).toThrow(/Circular import/);
+        expect(() => check('func f() { import "math"; }')).toThrow(/only allowed at the top level/);
+        expect(() => check("let x = (3 + 4i).toInt;")).toThrow(/has no property or method 'toInt'/);
+        expect(() => check('let xs = [1, 2]; xs.push("bad");')).toThrow(/cannot assign 'String' to 'Int'/);
+    });
 });

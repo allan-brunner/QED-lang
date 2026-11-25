@@ -19,4 +19,8 @@ export class Scope {
     lookup(name: string): SymbolEntry | undefined {
         return this.symbols.get(name) ?? this.parent?.lookup(name);
     }
+
+    entries(): IterableIterator<[string, SymbolEntry]> {
+        return this.symbols.entries();
+    }
 }

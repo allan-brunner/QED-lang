@@ -222,7 +222,7 @@ function readIdentifier(state: LexerState): LexerState {
     i++;
   }
   const lexeme = state.source.slice(state.index, i);
-  const type = KEYWORDS[lexeme] ?? TokenType.IDENT;
+  const type = KEYWORDS.get(lexeme) ?? TokenType.IDENT;
   return emit(state, type, lexeme);
 }
 
