@@ -297,4 +297,44 @@ describe("TypeChecker - Base", () => {
         expect(() => check("let x = (3 + 4i).toInt;")).toThrow(/has no property or method 'toInt'/);
         expect(() => check('let xs = [1, 2]; xs.push("bad");')).toThrow(/cannot assign 'String' to 'Int'/);
     });
+
+    it("checks Deque, Heap, and collection constructors", () => {
+        expect(() =>
+            check(`
+      let d1: Deque<Int> = Deque();
+      let d2 = Deque([1, 2, 3]);
+      let d3: Deque<Float> = Deque([1, 2]);
+      d1.pushFront(10);
+      d1.pushBack(20);
+      let front: Int? = d1.front;
+      let popped: Int? = d1.popBack();
+      let elem: Int = d2[0];
+      d2[0] = 99;
+      let hasOne: Boolean = 1 in d2;
+      for x in d2 { let n: Int = x; }
+
+      let h1: Heap<Int> = Heap();
+      let h2 = Heap([5, 1, 3]);
+      let h3 = Heap(["c", "a", "b"]);
+      h1.push(42);
+      let top: Int? = h1.peek;
+      let minVal: Int? = h1.pop();
+      let sorted: List<Int> = h2.toList();
+      for v in h2 { let n: Int = v; }
+
+      let s1: Set<String> = Set();
+      let s2 = Set([1, 2, 2]);
+      let m1: Map<String, Int> = Map();
+    `)
+        ).not.toThrow();
+
+        // Rejections
+        expect(() => check("let d = Deque();")).toThrow(/Cannot infer element type/);
+        expect(() => check("let h = Heap();")).toThrow(/Cannot infer element type/);
+        expect(() => check("let m = Map();")).toThrow(/Cannot infer types/);
+        expect(() => check("let h: Heap<Complex> = Heap();")).toThrow(/must be orderable/);
+        expect(() => check("let h = Heap([1i, 2i]);")).toThrow(/must be orderable/);
+        expect(() => check("let h = Heap([1, 2]); let x = h[0];")).toThrow(/Cannot index/);
+        expect(() => check("let d = Deque(42);")).toThrow(/not iterable/);
+    });
 });

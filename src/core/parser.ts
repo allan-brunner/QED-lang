@@ -755,6 +755,22 @@ export class Parser {
       return { kind: "NoneLit", token };
     }
 
+    if (this.match(
+      TokenType.TYPE_LIST,
+      TokenType.TYPE_SET,
+      TokenType.TYPE_MAP,
+      TokenType.TYPE_DEQUE,
+      TokenType.TYPE_HEAP
+    )) {
+      const token = this.previous();
+      if (!this.check(TokenType.LEFT_PAREN)) {
+        throw new Error(
+          `Parse error at ${token.line}:${token.column}: Expected '(' after collection constructor '${token.lexeme}'.`
+        );
+      }
+      return { kind: "Identifier", name: token.lexeme, token };
+    }
+
     if (this.match(TokenType.IDENT)) {
       const token = this.previous();
       return { kind: "Identifier", name: token.lexeme, token };

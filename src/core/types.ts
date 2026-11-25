@@ -15,6 +15,8 @@ export type Type =
     | { readonly kind: "Optional"; readonly inner: Type }
     | { readonly kind: "List"; readonly element: Type }
     | { readonly kind: "Set"; readonly element: Type }
+    | { readonly kind: "Deque"; readonly element: Type }
+    | { readonly kind: "Heap"; readonly element: Type }
     | { readonly kind: "Map"; readonly key: Type; readonly value: Type }
     | { readonly kind: "Vector"; readonly element: Type }
     | { readonly kind: "Matrix"; readonly element: Type }
@@ -37,6 +39,10 @@ export function isNumeric(t: Type): boolean {
 
 export function isInteger(t: Type): boolean {
     return t.kind === "Primitive" && (t.name === "Int" || t.name === "BigInt");
+}
+
+export function isOrdered(t: Type): boolean {
+    return isOrderedNumeric(t) || (t.kind === "Primitive" && t.name === "String");
 }
 
 export function isOrderedNumeric(t: Type): boolean {
@@ -66,6 +72,8 @@ export function typeToString(t: Type): string {
         case "Optional": return `${typeToString(t.inner)}?`;
         case "List": return `List<${typeToString(t.element)}>`;
         case "Set": return `Set<${typeToString(t.element)}>`;
+        case "Deque": return `Deque<${typeToString(t.element)}>`;
+        case "Heap": return `Heap<${typeToString(t.element)}>`;
         case "Map": return `Map<${typeToString(t.key)}, ${typeToString(t.value)}>`;
         case "Vector": return `Vector<${typeToString(t.element)}>`;
         case "Matrix": return `Matrix<${typeToString(t.element)}>`;
@@ -81,7 +89,9 @@ export function typeEquals(a: Type, b: Type): boolean {
         case "Primitive": return a.name === (b as typeof a).name;
         case "Optional": return typeEquals(a.inner, (b as typeof a).inner);
         case "List":
-        case "Set": return typeEquals(a.element, (b as typeof a).element);
+        case "Set":
+        case "Deque":
+        case "Heap": return typeEquals(a.element, (b as typeof a).element);
         case "Map": {
             const bm = b as typeof a;
             return typeEquals(a.key, bm.key) && typeEquals(a.value, bm.value);

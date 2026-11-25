@@ -202,6 +202,43 @@ export function lookupBuiltinMember(objType: Type, name: string): Type | undefin
         return undefined;
     }
 
+    // Deque<T>
+    if (objType.kind === "Deque") {
+        switch (name) {
+            case "length": return Types.Int;
+            case "isEmpty": return Types.Boolean;
+            case "front":
+            case "back":
+                return optionalOf(objType.element);
+            case "pushFront":
+            case "pushBack":
+                return fn([objType.element], Types.Void);
+            case "popFront":
+            case "popBack":
+                return fn([], optionalOf(objType.element));
+            case "contains":
+                return fn([objType.element], Types.Boolean);
+        }
+        return undefined;
+    }
+
+    // Heap<T>
+    if (objType.kind === "Heap") {
+        switch (name) {
+            case "length": return Types.Int;
+            case "isEmpty": return Types.Boolean;
+            case "peek":
+                return optionalOf(objType.element);
+            case "push":
+                return fn([objType.element], Types.Void);
+            case "pop":
+                return fn([], optionalOf(objType.element));
+            case "toList":
+                return fn([], { kind: "List", element: objType.element });
+        }
+        return undefined;
+    }
+
     // Map<K, V>
     if (objType.kind === "Map") {
         switch (name) {

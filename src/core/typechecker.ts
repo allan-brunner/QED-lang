@@ -1,7 +1,7 @@
 import { Expr, Stmt, TypeNode } from "./ast.js";
 import { Token, TokenType } from "./token.js";
 import { Scope, SymbolEntry } from "./scope.js";
-import { Type, Types, commonType, isAssignable, isInteger, isNumeric, isOrderedNumeric, optionalOf, promoteInteger, promoteNumeric, typeEquals, typeToString, unwrapOptional } from "./types.js";
+import { Type, Types, commonType, isAssignable, isInteger, isNumeric, isOrdered, isOrderedNumeric, optionalOf, promoteInteger, promoteNumeric, typeEquals, typeToString, unwrapOptional } from "./types.js";
 import { BUILTIN_MODULES, lookupBuiltinMember } from "./builtins.js";
 
 export class TypeError extends Error {
@@ -659,9 +659,10 @@ export class TypeChecker {
                 }
                 return fail();
 
-            // Membership (`in`)
+            // Membership
             case TokenType.IN:
-                if ((right.kind === "List" || right.kind === "Set") && isAssignable(left, right.element, this.isSubclass)) {
+                if ((right.kind === "List" || right.kind === "Set" || right.kind === "Deque" || right.kind === "Heap")
+                    && isAssignable(left, right.element, this.isSubclass)) {
                     return Types.Boolean;
                 }
                 if (right.kind === "Map" && isAssignable(left, right.key, this.isSubclass)) return Types.Boolean;
@@ -739,6 +740,78 @@ export class TypeChecker {
                 );
             }
         }
+    }
+
+    private makeUnaryCollection(
+        kind: "List" | "Set" | "Deque" | "Heap",
+        element: Type
+    ): Type {
+        switch (kind) {
+            case "List": return { kind: "List", element };
+            case "Set": return { kind: "Set", element };
+            case "Deque": return { kind: "Deque", element };
+            case "Heap": return { kind: "Heap", element };
+        }
+    }
+
+    private checkCollectionConstructor(
+        expr: Extract<Expr, { kind: "FunctionCall" }>,
+        expected?: Type
+    ): Type | undefined {
+        if (expr.object.kind !== "Identifier") return undefined;
+        const name = expr.object.name;
+        if (this.scope.lookup(name) || this.classes.has(name)) return undefined;
+
+        if (name === "Map") {
+            const target = unwrapOptional(expected);
+            if (expr.args.length === 0) {
+                if (target?.kind === "Map") return target;
+                throw new TypeError("Cannot infer types of empty 'Map()'; add a type annotation.", expr.token);
+            }
+            if (expr.args.length === 1) {
+                const src = this.checkExpr(expr.args[0], target?.kind === "Map" ? target : undefined);
+                if (src.kind !== "Map") {
+                    throw new TypeError(`'Map()' expects a Map argument, got '${typeToString(src)}'.`, expr.token);
+                }
+                return src;
+            }
+            throw new TypeError(`'Map()' takes at most 1 argument, got ${expr.args.length}.`, expr.token);
+        }
+
+        if (name === "List" || name === "Set" || name === "Deque" || name === "Heap") {
+            const target = unwrapOptional(expected);
+            const expectedElem = target?.kind === name ? target.element : undefined;
+
+            if (expr.args.length === 0) {
+                if (expectedElem) return this.makeUnaryCollection(name, expectedElem);
+                throw new TypeError(
+                    `Cannot infer element type of empty '${name}()'; add a type annotation.`,
+                    expr.token
+                );
+            }
+
+            if (expr.args.length === 1) {
+                const expectedArg: Type | undefined =
+                    expectedElem && expr.args[0].kind === "ListLit"
+                        ? { kind: "List", element: expectedElem }
+                        : undefined;
+                const srcType = this.checkExpr(expr.args[0], expectedArg);
+                const elemType = this.getIterableElementType(srcType, expr.token);
+
+                if (name === "Heap" && !isOrdered(elemType)) {
+                    throw new TypeError(
+                        `Heap element type must be orderable, got '${typeToString(elemType)}'.`,
+                        expr.token
+                    );
+                }
+
+                return this.makeUnaryCollection(name, elemType);
+            }
+
+            throw new TypeError(`'${name}()' takes at most 1 argument, got ${expr.args.length}.`, expr.token);
+        }
+
+        return undefined;
     }
 
     private promoteNumericCells(cells: readonly Expr[], kind: "Vector" | "Matrix", token: Token): Type {
@@ -931,6 +1004,8 @@ export class TypeChecker {
             }
 
             case "FunctionCall": {
+                const builtCollection = this.checkCollectionConstructor(expr, expected);
+                if (builtCollection) return builtCollection;
                 if (
                     expr.object.kind === "Identifier" &&
                     !this.scope.lookup(expr.object.name) &&
@@ -1055,9 +1130,9 @@ export class TypeChecker {
                 const objType = this.checkExpr(expr.object);
                 const idxTypes = expr.indexes.map((i) => this.checkExpr(i));
 
-                if (objType.kind === "List") {
+                if (objType.kind === "List" || objType.kind === "Deque") {
                     if (idxTypes.length !== 1 || !isInteger(idxTypes[0])) {
-                        throw new TypeError("List indexing requires a single integer index.", expr.token);
+                        throw new TypeError(`${objType.kind} indexing requires a single integer index.`, expr.token);
                     }
                     return objType.element;
                 }
@@ -1348,6 +1423,24 @@ export class TypeChecker {
                     base = { kind: "Set", element: this.resolveTypeNode(params[0]) };
                     break;
 
+                case TokenType.TYPE_DEQUE:
+                    if (params.length !== 1) throw new TypeError("Deque requires 1 type parameter.", node.name);
+                    base = { kind: "Deque", element: this.resolveTypeNode(params[0]) };
+                    break;
+
+                case TokenType.TYPE_HEAP: {
+                    if (params.length !== 1) throw new TypeError("Heap requires 1 type parameter.", node.name);
+                    const elem = this.resolveTypeNode(params[0]);
+                    if (!isOrdered(elem)) {
+                        throw new TypeError(
+                            `Heap element type must be orderable, got '${typeToString(elem)}'.`,
+                            node.name
+                        );
+                    }
+                    base = { kind: "Heap", element: elem };
+                    break;
+                }
+
                 case TokenType.TYPE_MAP:
                     if (params.length !== 2) throw new TypeError("Map requires 2 type parameters.", node.name);
                     base = {
@@ -1401,6 +1494,8 @@ export class TypeChecker {
         switch (iterable.kind) {
             case "List":
             case "Set":
+            case "Deque":
+            case "Heap":
             case "Vector":
                 return iterable.element;
             case "Matrix":
