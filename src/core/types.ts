@@ -153,3 +153,46 @@ export function isAssignable(source: Type, target: Type): boolean {
 
     return false;
 }
+
+export function unwrapOptional(t?: Type): Type | undefined {
+    return t?.kind === "Optional" ? t.inner : t;
+}
+
+/**
+ * Finds the narrowest shared type for two expressions, or `undefined` if incompatible.
+ */
+export function commonType(a: Type, b: Type): Type | undefined {
+    if (typeEquals(a, b)) return a;
+    if (a.kind === "Primitive" && a.name === "Never") return b;
+    if (b.kind === "Primitive" && b.name === "Never") return a;
+
+    // None + T -> T?
+    if (a.kind === "Primitive" && a.name === "None") return optionalOf(b);
+    if (b.kind === "Primitive" && b.name === "None") return optionalOf(a);
+
+    // T? + U -> commonType(T, U)?
+    if (a.kind === "Optional" || b.kind === "Optional") {
+        const innerA = a.kind === "Optional" ? a.inner : a;
+        const innerB = b.kind === "Optional" ? b.inner : b;
+        const merged = commonType(innerA, innerB);
+        return merged ? optionalOf(merged) : undefined;
+    }
+
+    // Numeric widening
+    const num = promoteNumeric(a, b);
+    if (num) return num;
+
+    // Element-wise widening for Vectors & Matrices
+    if (a.kind === "Vector" && b.kind === "Vector") {
+        const elem = promoteNumeric(a.element, b.element);
+        return elem ? { kind: "Vector", element: elem } : undefined;
+    }
+    if (a.kind === "Matrix" && b.kind === "Matrix") {
+        const elem = promoteNumeric(a.element, b.element);
+        return elem ? { kind: "Matrix", element: elem } : undefined;
+    }
+
+    if (isAssignable(a, b)) return b;
+    if (isAssignable(b, a)) return a;
+    return undefined;
+}

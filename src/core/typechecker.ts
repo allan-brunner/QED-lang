@@ -1,7 +1,7 @@
 import { Expr, Stmt, TypeNode } from "./ast.js";
 import { Token, TokenType } from "./token.js";
 import { Scope } from "./scope.js";
-import { Type, Types, isAssignable, isInteger, isNumeric, isOrderedNumeric, optionalOf, promoteInteger, promoteNumeric, typeEquals, typeToString } from "./types.js";
+import { Type, Types, commonType, isAssignable, isInteger, isNumeric, isOrderedNumeric, optionalOf, promoteInteger, promoteNumeric, typeEquals, typeToString, unwrapOptional } from "./types.js";
 
 export class TypeError extends Error {
     constructor(message: string, public readonly token?: Token) {
@@ -248,6 +248,46 @@ export class TypeChecker {
         }
     }
 
+    private checkHomogeneousElements(
+        elements: readonly Expr[],
+        expectedElem: Type | undefined,
+        kind: "List" | "Set",
+        token: Token
+    ): Type {
+        // Contextual mode: validate each element directly against the expected element type
+        if (expectedElem) {
+            for (const el of elements) {
+                const elType = this.checkExpr(el, expectedElem);
+                if (!isAssignable(elType, expectedElem)) {
+                    throw new TypeError(
+                        `${kind} element of type '${typeToString(elType)}' is not assignable to '${typeToString(expectedElem)}'.`,
+                        token
+                    );
+                }
+            }
+            return expectedElem;
+        }
+
+        // Inference mode: fold elements with commonType()
+        let acc: Type | undefined;
+        for (const el of elements) {
+            const elType = this.checkExpr(el);
+            if (!acc) {
+                acc = elType;
+            } else {
+                const merged = commonType(acc, elType);
+                if (!merged) {
+                    throw new TypeError(
+                        `Incompatible ${kind} element types: '${typeToString(acc)}' and '${typeToString(elType)}'.`,
+                        token
+                    );
+                }
+                acc = merged;
+            }
+        }
+        return acc!;
+    }
+
     private promoteNumericCells(cells: readonly Expr[], kind: "Vector" | "Matrix", token: Token): Type {
         let acc: Type | undefined;
         for (const cell of cells) {
@@ -287,6 +327,108 @@ export class TypeChecker {
                 return { kind: "Matrix", element };
             }
 
+            case "ListLit": {
+                const target = unwrapOptional(expected);
+                const expectedElem = target?.kind === "List" ? target.element : undefined;
+
+                if (expr.elements.length === 0) {
+                    if (expectedElem) return { kind: "List", element: expectedElem };
+                    throw new TypeError(
+                        "Cannot infer element type of empty list '[]'; add a type annotation.",
+                        expr.token
+                    );
+                }
+
+                const element = this.checkHomogeneousElements(expr.elements, expectedElem, "List", expr.token);
+                return { kind: "List", element };
+            }
+
+            case "ListDynamicLit": {
+                const startType = this.checkExpr(expr.start);
+                const endType = this.checkExpr(expr.end);
+                const stepType = expr.step ? this.checkExpr(expr.step) : undefined;
+
+                if (
+                    !isOrderedNumeric(startType) ||
+                    !isOrderedNumeric(endType) ||
+                    (stepType && !isOrderedNumeric(stepType))
+                ) {
+                    throw new TypeError(
+                        "Dynamic list bounds and step must be real numeric types (Int, BigInt, Float, Double)."
+                    );
+                }
+
+                let element = promoteNumeric(startType, endType)!;
+                if (stepType) {
+                    element = promoteNumeric(element, stepType)!;
+                }
+                return { kind: "List", element };
+            }
+
+            case "SetLit": {
+                const target = unwrapOptional(expected);
+                const expectedElem = target?.kind === "Set" ? target.element : undefined;
+
+                const element = this.checkHomogeneousElements(expr.elements, expectedElem, "Set", expr.token);
+                return { kind: "Set", element };
+            }
+
+            case "MapLit": {
+                const target = unwrapOptional(expected);
+                const expectedKey = target?.kind === "Map" ? target.key : undefined;
+                const expectedVal = target?.kind === "Map" ? target.value : undefined;
+
+                let keyType: Type | undefined = expectedKey;
+                let valType: Type | undefined = expectedVal;
+
+                for (const entry of expr.entries) {
+                    const k = this.checkExpr(entry.key, expectedKey);
+                    const v = this.checkExpr(entry.value, expectedVal);
+
+                    if (expectedKey) {
+                        if (!isAssignable(k, expectedKey)) {
+                            throw new TypeError(
+                                `Map key of type '${typeToString(k)}' is not assignable to '${typeToString(expectedKey)}'.`,
+                                expr.token
+                            );
+                        }
+                    } else if (!keyType) {
+                        keyType = k;
+                    } else {
+                        const mergedK = commonType(keyType, k);
+                        if (!mergedK) {
+                            throw new TypeError(
+                                `Incompatible Map key types: '${typeToString(keyType)}' and '${typeToString(k)}'.`,
+                                expr.token
+                            );
+                        }
+                        keyType = mergedK;
+                    }
+
+                    if (expectedVal) {
+                        if (!isAssignable(v, expectedVal)) {
+                            throw new TypeError(
+                                `Map value of type '${typeToString(v)}' is not assignable to '${typeToString(expectedVal)}'.`,
+                                expr.token
+                            );
+                        }
+                    } else if (!valType) {
+                        valType = v;
+                    } else {
+                        const mergedV = commonType(valType, v);
+                        if (!mergedV) {
+                            throw new TypeError(
+                                `Incompatible Map value types: '${typeToString(valType)}' and '${typeToString(v)}'.`,
+                                expr.token
+                            );
+                        }
+                        valType = mergedV;
+                    }
+                }
+
+                return { kind: "Map", key: keyType!, value: valType! };
+            }
+
             case "Identifier": {
                 const entry = this.scope.lookup(expr.name);
                 if (!entry) {
@@ -308,6 +450,21 @@ export class TypeChecker {
                     if (!isAssignable(valueType, entry.type)) {
                         throw new TypeError(
                             `Cannot assign '${typeToString(valueType)}' to '${typeToString(entry.type)}'.`,
+                            expr.token
+                        );
+                    }
+                    return valueType;
+                }
+                if (expr.target.kind === "Index") {
+                    const objType = this.checkExpr(expr.target.object);
+                    if (objType.kind === "Primitive" && objType.name === "String") {
+                        throw new TypeError("Cannot mutate a String by index.", expr.token);
+                    }
+                    const slotType = this.checkExpr(expr.target);
+                    const valueType = this.checkExpr(expr.value, slotType);
+                    if (!isAssignable(valueType, slotType)) {
+                        throw new TypeError(
+                            `Cannot assign '${typeToString(valueType)}' to '${typeToString(slotType)}'.`,
                             expr.token
                         );
                     }
@@ -360,6 +517,30 @@ export class TypeChecker {
                 const objType = this.checkExpr(expr.object);
                 const idxTypes = expr.indexes.map((i) => this.checkExpr(i));
 
+                if (objType.kind === "List") {
+                    if (idxTypes.length !== 1 || !isInteger(idxTypes[0])) {
+                        throw new TypeError("List indexing requires a single integer index.", expr.token);
+                    }
+                    return objType.element;
+                }
+
+                if (objType.kind === "Map") {
+                    if (idxTypes.length !== 1 || !isAssignable(idxTypes[0], objType.key)) {
+                        throw new TypeError(
+                            `Map key must be assignable to '${typeToString(objType.key)}'.`,
+                            expr.token
+                        );
+                    }
+                    return objType.value;
+                }
+
+                if (objType.kind === "Primitive" && objType.name === "String") {
+                    if (idxTypes.length !== 1 || !isInteger(idxTypes[0])) {
+                        throw new TypeError("String indexing requires a single integer index.", expr.token);
+                    }
+                    return Types.String;
+                }
+
                 if (objType.kind === "Vector") {
                     if (idxTypes.length !== 1 || !isInteger(idxTypes[0])) {
                         throw new TypeError("Vector indexing requires a single integer index.", expr.token);
@@ -377,14 +558,35 @@ export class TypeChecker {
                     throw new TypeError("Matrix indexing requires 1 or 2 integer indexes.", expr.token);
                 }
 
-                // TODO: List, Map, String indexing
                 throw new TypeError(`Cannot index into type '${typeToString(objType)}'.`, expr.token);
             }
 
+            case "Slicing": {
+                const objType = this.checkExpr(expr.object);
+                if (expr.start && !isInteger(this.checkExpr(expr.start))) {
+                    throw new TypeError("Slice start index must be an integer.", expr.token);
+                }
+                if (expr.end && !isInteger(this.checkExpr(expr.end))) {
+                    throw new TypeError("Slice end index must be an integer.", expr.token);
+                }
+
+                if (
+                    objType.kind === "List" ||
+                    objType.kind === "Vector" ||
+                    (objType.kind === "Primitive" && objType.name === "String")
+                ) {
+                    return objType;
+                }
+
+                throw new TypeError(`Cannot slice type '${typeToString(objType)}'.`, expr.token);
+            }
+
             case "Block": {
+                const target = unwrapOptional(expected);
+
                 if (expr.statements.length === 0 && !expr.returnExpr && !expr.unreachable) {
-                    if (expected?.kind === "Map" || expected?.kind === "Set") {
-                        return expected;
+                    if (target?.kind === "Map" || target?.kind === "Set") {
+                        return target;
                     }
                     return Types.Void;
                 }
