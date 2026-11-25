@@ -96,4 +96,118 @@ describe("TypeChecker - Base", () => {
         expect(() => check('let s = "abc"; s[0] = "z";')).toThrow(/Cannot mutate a String/);
         expect(() => check('let a = [1, 2]; let s = a["0":1];')).toThrow(/must be an integer/);
     });
+
+    it("checks while, for, break/continue, and match expressions", () => {
+        expect(() =>
+            check(`
+        let i = 0;
+        while i < 5 {
+            i = i + 1;
+            if i == 3 { continue; }
+        }
+
+        // Loop returning a value via break -> Int?
+        let found: Int? = for n in [1 to 10] {
+            if n > 5 { break n; }
+        };
+
+        // Wildcard for-loop & matrix row iteration
+        let sum = 0;
+        for _ in [1, 2, 3] { sum = sum + 1; }
+        for row in <1, 2; 3, 4> {
+            let first: Int = row[0];
+        }
+
+        // Exhaustive match with numeric promotion and optional matching
+        let label: Float = match i {
+            0 => 1,
+            1 | 2 => 2.5,
+            _ => 0,
+        };
+
+        let flag = true;
+        let boolMatch: Int = match flag {
+            true => 1,
+            false => 0,
+        };
+
+        let opt: Int? = None;
+        let unwrapped: Int = match opt {
+            None => 0,
+            1 => 10,
+            _ => -1,
+        };
+
+        // Side-effecting match without wildcard is allowed
+        match i {
+            0 => { sum = 0; },
+        }
+    `)
+        ).not.toThrow();
+
+        // Rejections
+        expect(() => check("while 1 { }")).toThrow(/must be Boolean/);
+        expect(() => check("for x in 42 { }")).toThrow(/not iterable/);
+        expect(() => check("for x in [1, 2] { x = 3; }")).toThrow(/Cannot reassign constant/);
+        expect(() => check("break;")).toThrow(/inside a loop/);
+        expect(() => check("continue;")).toThrow(/inside a loop/);
+        expect(() => check("return 1;")).toThrow(/inside a function/);
+        expect(() => check("for x in [1, 2] { if x == 1 { break; } else { break x; } }")).toThrow(/Cannot mix/);
+        expect(() => check('let x = match 1 { "a" => 1, _ => 2 };')).toThrow(/cannot match/);
+        expect(() => check("let x = match 1 { 0 => 1, 1 => 2 };")).toThrow(/Non-exhaustive/);
+        expect(() => check('let x = match 1 { 0 => 1, _ => "two" };')).toThrow(/Incompatible 'match' arm types/);
+        expect(() => check("let x = _;")).toThrow(/Wildcard '_'/);
+    });
+
+    it("supports two-pass hoisting, recursion, functions, classes, inheritance, and this", () => {
+        expect(() =>
+            check(`
+      // Mutual recursion (requires two-pass hoisting)
+      func isEven(n: Int): Boolean => n == 0 ? true : isOdd(n - 1);
+      func isOdd(n: Int): Boolean => n == 0 ? false : isEven(n - 1);
+
+      // Inferred return type & parameterless computed function
+      func square(x: Int) => x * x;
+      func pi: Float => 3.14159;
+      let sq: Int = square(4);
+      let circleArea: Double = pi * 2 ** 2;
+
+      // Forward class inheritance & self-referential fields
+      class Vec2 inherits Shape {
+        let x: Float = 0.0;
+        let y: Float = 0.0;
+        const dim: Int = 2;
+
+        func init(x: Float, y: Float) {
+          this.x = x;
+          this.y = y;
+        }
+
+        func norm: Double {
+          return (this.x ** 2 + this.y ** 2).sqrt;
+        }
+      }
+
+      class Shape {
+        let id: Int = 0;
+        func getId(): Int { return this.id; }
+      }
+
+      let v = Vec2(3.0, 4.0);
+      let s: Shape = v;            // Subclass assignability
+      let n: Double = v.norm;      // Auto-invoked parameterless method
+      let id: Int = v.getId();     // Inherited method
+      v.x = 1.0;
+    `)
+        ).not.toThrow();
+
+        // Rejections
+        expect(() => check("class A inherits B {} class B inherits A {}")).toThrow(/Circular inheritance/);
+        expect(() => check("class A inherits Missing {}")).toThrow(/not defined/);
+        expect(() => check("let x = this;")).toThrow(/inside a class method/);
+        expect(() => check("func bad(x: Int): Int { if x > 0 { return 1; } }")).toThrow(/body evaluates to 'Void'/);
+        expect(() => check("func f(x: Int): Int => x; let a = f(1, 2);")).toThrow(/Expected 1 argument/);
+        expect(() => check("class C { const k: Int = 1; } let c = C(); c.k = 2;")).toThrow(/constant field/);
+        expect(() => check("let x = f(1); func f(a: Int) => a;")).toThrow(/explicit return type/);
+    });
 });

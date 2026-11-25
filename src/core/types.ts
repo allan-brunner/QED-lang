@@ -18,8 +18,10 @@ export type Type =
     | { readonly kind: "Map"; readonly key: Type; readonly value: Type }
     | { readonly kind: "Vector"; readonly element: Type }
     | { readonly kind: "Matrix"; readonly element: Type }
-    | { readonly kind: "Function"; readonly params: readonly Type[]; readonly returnType: Type }
+    | { readonly kind: "Function"; readonly params: readonly Type[]; readonly returnType: Type; readonly hasParens?: boolean; }
     | { readonly kind: "Class"; readonly name: string };
+
+export type SubclassChecker = (sub: string, sup: string) => boolean;
 
 const NUMERIC_RANK: Partial<Record<PrimitiveName, number>> = {
     Int: 0,
@@ -124,17 +126,19 @@ export function promoteInteger(a: Type, b: Type): Type | undefined {
     return promoteNumeric(a, b);
 }
 
-export function isAssignable(source: Type, target: Type): boolean {
+export function isAssignable(source: Type, target: Type, isSubclass?: SubclassChecker): boolean {
     if (source.kind === "Primitive" && source.name === "Never") return true;
     if (typeEquals(source, target)) return true;
 
-    // T -> T? and None -> T?
     if (target.kind === "Optional") {
         if (source.kind === "Primitive" && source.name === "None") return true;
-        return isAssignable(source, target.inner);
+        return isAssignable(source, target.inner, isSubclass);
     }
 
-    // Scalar numeric widening
+    if (source.kind === "Class" && target.kind === "Class" && isSubclass) {
+        return isSubclass(source.name, target.name);
+    }
+
     if (source.kind === "Primitive" && target.kind === "Primitive") {
         const rankS = NUMERIC_RANK[source.name];
         const rankT = NUMERIC_RANK[target.name];
@@ -143,12 +147,11 @@ export function isAssignable(source: Type, target: Type): boolean {
         }
     }
 
-    // Element-wise widening for Vectors & Matrices
     if (source.kind === "Vector" && target.kind === "Vector") {
-        return isAssignable(source.element, target.element);
+        return isAssignable(source.element, target.element, isSubclass);
     }
     if (source.kind === "Matrix" && target.kind === "Matrix") {
-        return isAssignable(source.element, target.element);
+        return isAssignable(source.element, target.element, isSubclass);
     }
 
     return false;
@@ -161,28 +164,24 @@ export function unwrapOptional(t?: Type): Type | undefined {
 /**
  * Finds the narrowest shared type for two expressions, or `undefined` if incompatible.
  */
-export function commonType(a: Type, b: Type): Type | undefined {
+export function commonType(a: Type, b: Type, isSubclass?: SubclassChecker): Type | undefined {
     if (typeEquals(a, b)) return a;
     if (a.kind === "Primitive" && a.name === "Never") return b;
     if (b.kind === "Primitive" && b.name === "Never") return a;
 
-    // None + T -> T?
     if (a.kind === "Primitive" && a.name === "None") return optionalOf(b);
     if (b.kind === "Primitive" && b.name === "None") return optionalOf(a);
 
-    // T? + U -> commonType(T, U)?
     if (a.kind === "Optional" || b.kind === "Optional") {
         const innerA = a.kind === "Optional" ? a.inner : a;
         const innerB = b.kind === "Optional" ? b.inner : b;
-        const merged = commonType(innerA, innerB);
+        const merged = commonType(innerA, innerB, isSubclass);
         return merged ? optionalOf(merged) : undefined;
     }
 
-    // Numeric widening
     const num = promoteNumeric(a, b);
     if (num) return num;
 
-    // Element-wise widening for Vectors & Matrices
     if (a.kind === "Vector" && b.kind === "Vector") {
         const elem = promoteNumeric(a.element, b.element);
         return elem ? { kind: "Vector", element: elem } : undefined;
@@ -192,7 +191,7 @@ export function commonType(a: Type, b: Type): Type | undefined {
         return elem ? { kind: "Matrix", element: elem } : undefined;
     }
 
-    if (isAssignable(a, b)) return b;
-    if (isAssignable(b, a)) return a;
+    if (isAssignable(a, b, isSubclass)) return b;
+    if (isAssignable(b, a, isSubclass)) return a;
     return undefined;
 }

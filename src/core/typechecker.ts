@@ -10,14 +10,152 @@ export class TypeError extends Error {
     }
 }
 
+interface LoopContext {
+    readonly expectedValue?: Type;
+    readonly breakTypes: Type[];
+    hasBareBreak: boolean;
+}
+
+interface FuncContext {
+    readonly declaredReturn?: Type;
+    readonly inferredReturns: Type[];
+}
+
+interface FieldInfo {
+    readonly type: Type;
+    readonly isConst: boolean;
+}
+
+interface MethodInfo {
+    readonly params: readonly Type[];
+    readonly returnType: Type;
+    readonly hasParens: boolean;
+}
+
+interface ClassInfo {
+    readonly name: string;
+    parent?: string;
+    readonly fields: Map<string, FieldInfo>;
+    readonly methods: Map<string, MethodInfo>;
+}
+
 export class TypeChecker {
     private scope = new Scope();
+
+    private readonly loopStack: LoopContext[] = [];
+    private readonly funcStack: FuncContext[] = [];
+
+    private readonly classes = new Map<string, ClassInfo>();
+    private readonly pendingFuncs = new Set<string>();
+    private currentClass?: ClassInfo;
 
     public readonly exprTypes = new Map<Expr, Type>();
 
     public checkProgram(stmts: readonly Stmt[]): void {
+        this.hoistDeclarations(stmts);
         for (const stmt of stmts) {
             this.checkStmt(stmt);
+        }
+    }
+
+    private hoistDeclarations(stmts: readonly Stmt[]): void {
+        for (const stmt of stmts) {
+            if (stmt.kind !== "ClassDecl") continue;
+            const name = stmt.identifier.lexeme;
+            if (this.classes.has(name)) {
+                throw new TypeError(`Class '${name}' is already declared.`, stmt.identifier);
+            }
+            this.classes.set(name, { name, fields: new Map(), methods: new Map() });
+        }
+
+        for (const stmt of stmts) {
+            if (stmt.kind !== "ClassDecl" || !stmt.inherits) continue;
+            const cls = this.classes.get(stmt.identifier.lexeme)!;
+            const parentName = stmt.inherits.lexeme;
+
+            if (!this.classes.has(parentName)) {
+                throw new TypeError(`Superclass '${parentName}' is not defined.`, stmt.inherits);
+            }
+            cls.parent = parentName;
+
+            // Cycle detection
+            let cursor: string | undefined = parentName;
+            while (cursor) {
+                if (cursor === cls.name) {
+                    throw new TypeError(`Circular inheritance detected involving '${cls.name}'.`, stmt.inherits);
+                }
+                cursor = this.classes.get(cursor)?.parent;
+            }
+        }
+
+        for (const stmt of stmts) {
+            if (stmt.kind === "FuncDecl") {
+                this.hoistFuncSignature(stmt);
+            } else if (stmt.kind === "ClassDecl") {
+                this.hoistClassMembers(stmt);
+            }
+        }
+    }
+
+    private resolveFuncParams(stmt: Extract<Stmt, { kind: "FuncDecl" }>): Type[] {
+        return stmt.params.map((p) => {
+            if (!p.typeAnnotation) {
+                throw new TypeError(
+                    `Parameter '${p.name.lexeme}' of function '${stmt.identifier.lexeme}' requires a type annotation.`,
+                    p.name
+                );
+            }
+            return this.resolveTypeNode(p.typeAnnotation);
+        });
+    }
+
+    private hoistFuncSignature(stmt: Extract<Stmt, { kind: "FuncDecl" }>): void {
+        const name = stmt.identifier.lexeme;
+        const params = this.resolveFuncParams(stmt);
+
+        if (!stmt.returnType) {
+            this.pendingFuncs.add(name);
+            return;
+        }
+
+        const fnType: Type = {
+            kind: "Function",
+            params,
+            returnType: this.resolveTypeNode(stmt.returnType),
+            hasParens: stmt.hasParens ?? true,
+        };
+
+        if (!this.scope.define(name, { type: fnType, isConst: true })) {
+            throw new TypeError(`Function '${name}' is already declared in this scope.`, stmt.identifier);
+        }
+    }
+
+    private hoistClassMembers(stmt: Extract<Stmt, { kind: "ClassDecl" }>): void {
+        const cls = this.classes.get(stmt.identifier.lexeme)!;
+
+        for (const member of stmt.members) {
+            if (member.kind === "VarDecl" && member.typeAnnotation) {
+                const fieldName = member.name.lexeme;
+                if (cls.fields.has(fieldName) || cls.methods.has(fieldName)) {
+                    throw new TypeError(`Duplicate member '${fieldName}' in class '${cls.name}'.`, member.name);
+                }
+                cls.fields.set(fieldName, {
+                    type: this.resolveTypeNode(member.typeAnnotation),
+                    isConst: member.isConst,
+                });
+            } else if (member.kind === "FuncDecl") {
+                const methodName = member.identifier.lexeme;
+                if (cls.fields.has(methodName) || cls.methods.has(methodName)) {
+                    throw new TypeError(`Duplicate member '${methodName}' in class '${cls.name}'.`, member.identifier);
+                }
+                const params = this.resolveFuncParams(member);
+                const returnType = member.returnType ? this.resolveTypeNode(member.returnType) : Types.Void;
+                cls.methods.set(methodName, {
+                    params,
+                    returnType,
+                    hasParens: member.hasParens ?? true,
+                });
+            }
         }
     }
 
@@ -30,7 +168,7 @@ export class TypeChecker {
 
                 const initType = this.checkExpr(stmt.initializer, expected);
 
-                if (expected && !isAssignable(initType, expected)) {
+                if (expected && !isAssignable(initType, expected, this.isSubclass)) {
                     throw new TypeError(
                         `Cannot assign '${typeToString(initType)}' to '${stmt.name.lexeme}' of type '${typeToString(expected)}'.`,
                         stmt.name
@@ -55,8 +193,179 @@ export class TypeChecker {
                 this.checkExpr(stmt.expr);
                 return;
 
+            case "ContinueStmt": {
+                if (this.loopStack.length === 0) {
+                    throw new TypeError("'continue' can only be used inside a loop.", stmt.token);
+                }
+                return;
+            }
+
+            case "BreakStmt": {
+                const loop = this.loopStack[this.loopStack.length - 1];
+                if (!loop) {
+                    throw new TypeError("'break' can only be used inside a loop.", stmt.token);
+                }
+
+                if (!stmt.returned) {
+                    loop.hasBareBreak = true;
+                    return;
+                }
+
+                const valType = this.checkExpr(stmt.returned, loop.expectedValue);
+                if (loop.expectedValue && !isAssignable(valType, loop.expectedValue, this.isSubclass)) {
+                    throw new TypeError(
+                        `Cannot break with '${typeToString(valType)}'; expected '${typeToString(loop.expectedValue)}'.`,
+                        stmt.token
+                    );
+                }
+                loop.breakTypes.push(valType);
+                return;
+            }
+
+            case "ReturnStmt": {
+                const fn = this.funcStack[this.funcStack.length - 1];
+                if (!fn) {
+                    throw new TypeError("'return' can only be used inside a function.", stmt.token);
+                }
+
+                const retType = stmt.returned
+                    ? this.checkExpr(stmt.returned, fn.declaredReturn)
+                    : Types.Void;
+
+                if (fn.declaredReturn) {
+                    if (!isAssignable(retType, fn.declaredReturn, this.isSubclass)) {
+                        throw new TypeError(
+                            `Cannot return '${typeToString(retType)}' from function returning '${typeToString(fn.declaredReturn)}'.`,
+                            stmt.token
+                        );
+                    }
+                } else {
+                    fn.inferredReturns.push(retType);
+                }
+                return;
+            }
+
+            case "FuncDecl": {
+                this.checkFuncBody(stmt, false);
+                return;
+            }
+
+            case "ClassDecl": {
+                const cls = this.classes.get(stmt.identifier.lexeme)!;
+                const prevClass = this.currentClass;
+                this.currentClass = cls;
+
+                try {
+                    for (const member of stmt.members) {
+                        if (member.kind !== "VarDecl") continue;
+
+                        if (member.typeAnnotation) {
+                            const expected = cls.fields.get(member.name.lexeme)!.type;
+                            const initType = this.checkExpr(member.initializer, expected);
+                            if (!isAssignable(initType, expected, this.isSubclass)) {
+                                throw new TypeError(
+                                    `Cannot assign '${typeToString(initType)}' to field '${member.name.lexeme}' of type '${typeToString(expected)}'.`,
+                                    member.name
+                                );
+                            }
+                        } else {
+                            const fieldName = member.name.lexeme;
+                            if (cls.fields.has(fieldName) || cls.methods.has(fieldName)) {
+                                throw new TypeError(`Duplicate member '${fieldName}' in class '${cls.name}'.`, member.name);
+                            }
+                            const initType = this.checkExpr(member.initializer);
+                            if (initType.kind === "Primitive" && initType.name === "None") {
+                                throw new TypeError(
+                                    `Cannot infer type of field '${fieldName}' from 'None'; add an explicit type annotation.`,
+                                    member.name
+                                );
+                            }
+                            cls.fields.set(fieldName, { type: initType, isConst: member.isConst });
+                        }
+                    }
+
+                    for (const member of stmt.members) {
+                        if (member.kind === "FuncDecl") {
+                            this.checkFuncBody(member, true);
+                        }
+                    }
+                } finally {
+                    this.currentClass = prevClass;
+                }
+                return;
+            }
+
             default:
                 throw new TypeError(`Type checking for statement '${stmt.kind}' is not implemented yet.`);
+        }
+    }
+
+    private checkFuncBody(stmt: Extract<Stmt, { kind: "FuncDecl" }>, isMethod: boolean): void {
+        const name = stmt.identifier.lexeme;
+        const paramTypes = this.resolveFuncParams(stmt);
+        const declaredReturn = stmt.returnType ? this.resolveTypeNode(stmt.returnType) : undefined;
+
+        const prevScope = this.scope;
+        this.scope = new Scope(prevScope);
+        const fnCtx: FuncContext = { declaredReturn, inferredReturns: [] };
+        this.funcStack.push(fnCtx);
+
+        let bodyType: Type;
+        try {
+            stmt.params.forEach((param, i) => {
+                if (!this.scope.define(param.name.lexeme, { type: paramTypes[i], isConst: true })) {
+                    throw new TypeError(`Duplicate parameter '${param.name.lexeme}'.`, param.name);
+                }
+            });
+
+            bodyType = this.checkExpr(stmt.body, declaredReturn);
+        } finally {
+            this.funcStack.pop();
+            this.scope = prevScope;
+        }
+
+        if (declaredReturn) {
+            if (!isAssignable(bodyType, declaredReturn, this.isSubclass)) {
+                throw new TypeError(
+                    `Function '${name}' declared return type '${typeToString(declaredReturn)}', but body evaluates to '${typeToString(bodyType)}'.`,
+                    stmt.identifier
+                );
+            }
+            return;
+        }
+
+        const allReturns = [...fnCtx.inferredReturns];
+        if (!(bodyType.kind === "Primitive" && bodyType.name === "Never")) {
+            allReturns.push(bodyType);
+        }
+
+        let inferred: Type = Types.Void;
+        if (allReturns.length > 0) {
+            inferred = allReturns[0];
+            for (let i = 1; i < allReturns.length; i++) {
+                const merged = commonType(inferred, allReturns[i], this.isSubclass);
+                if (!merged) {
+                    throw new TypeError(
+                        `Incompatible return types in function '${name}': '${typeToString(inferred)}' and '${typeToString(allReturns[i])}'.`,
+                        stmt.identifier
+                    );
+                }
+                inferred = merged;
+            }
+        }
+
+        if (isMethod && this.currentClass) {
+            this.currentClass.methods.set(name, {
+                params: paramTypes,
+                returnType: inferred,
+                hasParens: stmt.hasParens ?? true,
+            });
+        } else {
+            this.pendingFuncs.delete(name);
+            this.scope.define(name, {
+                type: { kind: "Function", params: paramTypes, returnType: inferred, hasParens: stmt.hasParens ?? true },
+                isConst: true,
+            });
         }
     }
 
@@ -214,8 +523,8 @@ export class TypeChecker {
                     promoteNumeric(left, right) ||
                     (left.kind === "Vector" && right.kind === "Vector") ||
                     (left.kind === "Matrix" && right.kind === "Matrix") ||
-                    isAssignable(left, right) ||
-                    isAssignable(right, left)
+                    isAssignable(left, right, this.isSubclass) ||
+                    isAssignable(right, left, this.isSubclass)
                 ) {
                     return Types.Boolean;
                 }
@@ -224,17 +533,17 @@ export class TypeChecker {
             // Logical
             case TokenType.AMP_AMP:
             case TokenType.PIPE_PIPE:
-                if (isAssignable(left, Types.Boolean) && isAssignable(right, Types.Boolean)) {
+                if (isAssignable(left, Types.Boolean, this.isSubclass) && isAssignable(right, Types.Boolean, this.isSubclass)) {
                     return Types.Boolean;
                 }
                 return fail();
 
             // Membership (`in`)
             case TokenType.IN:
-                if ((right.kind === "List" || right.kind === "Set") && isAssignable(left, right.element)) {
+                if ((right.kind === "List" || right.kind === "Set") && isAssignable(left, right.element, this.isSubclass)) {
                     return Types.Boolean;
                 }
-                if (right.kind === "Map" && isAssignable(left, right.key)) return Types.Boolean;
+                if (right.kind === "Map" && isAssignable(left, right.key, this.isSubclass)) return Types.Boolean;
                 if (
                     left.kind === "Primitive" && left.name === "String" &&
                     right.kind === "Primitive" && right.name === "String"
@@ -258,7 +567,7 @@ export class TypeChecker {
         if (expectedElem) {
             for (const el of elements) {
                 const elType = this.checkExpr(el, expectedElem);
-                if (!isAssignable(elType, expectedElem)) {
+                if (!isAssignable(elType, expectedElem, this.isSubclass)) {
                     throw new TypeError(
                         `${kind} element of type '${typeToString(elType)}' is not assignable to '${typeToString(expectedElem)}'.`,
                         token
@@ -275,7 +584,7 @@ export class TypeChecker {
             if (!acc) {
                 acc = elType;
             } else {
-                const merged = commonType(acc, elType);
+                const merged = commonType(acc, elType, this.isSubclass);
                 if (!merged) {
                     throw new TypeError(
                         `Incompatible ${kind} element types: '${typeToString(acc)}' and '${typeToString(elType)}'.`,
@@ -286,6 +595,43 @@ export class TypeChecker {
             }
         }
         return acc!;
+    }
+
+    private checkCallArgs(
+        args: readonly Expr[],
+        expectedParams: readonly Type[],
+        label: string,
+        token: Token
+    ): void {
+        if (args.length !== expectedParams.length) {
+            throw new TypeError(
+                `Expected ${expectedParams.length} argument(s) for '${label}', got ${args.length}.`,
+                token
+            );
+        }
+        for (let i = 0; i < args.length; i++) {
+            const argType = this.checkExpr(args[i], expectedParams[i]);
+            if (!isAssignable(argType, expectedParams[i], this.isSubclass)) {
+                throw new TypeError(
+                    `Argument ${i + 1} of '${label}': cannot assign '${typeToString(argType)}' to '${typeToString(expectedParams[i])}'.`,
+                    token
+                );
+            }
+        }
+    }
+
+    private lookupBuiltinMember(objType: Type, name: string): Type | undefined {
+        if (isNumeric(objType)) {
+            if (name === "sqrt") return objType.kind === "Primitive" && objType.name === "Complex" ? Types.Complex : Types.Double;
+            if (name === "abs") return objType.kind === "Primitive" && objType.name === "Complex" ? Types.Double : objType;
+        }
+        if (objType.kind === "List" || objType.kind === "Set" || objType.kind === "Map" || objType.kind === "Vector") {
+            if (name === "len") return Types.Int;
+        }
+        if (objType.kind === "Primitive" && objType.name === "String") {
+            if (name === "len") return Types.Int;
+        }
+        return undefined;
     }
 
     private promoteNumericCells(cells: readonly Expr[], kind: "Vector" | "Matrix", token: Token): Type {
@@ -386,7 +732,7 @@ export class TypeChecker {
                     const v = this.checkExpr(entry.value, expectedVal);
 
                     if (expectedKey) {
-                        if (!isAssignable(k, expectedKey)) {
+                        if (!isAssignable(k, expectedKey, this.isSubclass)) {
                             throw new TypeError(
                                 `Map key of type '${typeToString(k)}' is not assignable to '${typeToString(expectedKey)}'.`,
                                 expr.token
@@ -395,7 +741,7 @@ export class TypeChecker {
                     } else if (!keyType) {
                         keyType = k;
                     } else {
-                        const mergedK = commonType(keyType, k);
+                        const mergedK = commonType(keyType, k, this.isSubclass);
                         if (!mergedK) {
                             throw new TypeError(
                                 `Incompatible Map key types: '${typeToString(keyType)}' and '${typeToString(k)}'.`,
@@ -406,7 +752,7 @@ export class TypeChecker {
                     }
 
                     if (expectedVal) {
-                        if (!isAssignable(v, expectedVal)) {
+                        if (!isAssignable(v, expectedVal, this.isSubclass)) {
                             throw new TypeError(
                                 `Map value of type '${typeToString(v)}' is not assignable to '${typeToString(expectedVal)}'.`,
                                 expr.token
@@ -415,7 +761,7 @@ export class TypeChecker {
                     } else if (!valType) {
                         valType = v;
                     } else {
-                        const mergedV = commonType(valType, v);
+                        const mergedV = commonType(valType, v, this.isSubclass);
                         if (!mergedV) {
                             throw new TypeError(
                                 `Incompatible Map value types: '${typeToString(valType)}' and '${typeToString(v)}'.`,
@@ -432,9 +778,71 @@ export class TypeChecker {
             case "Identifier": {
                 const entry = this.scope.lookup(expr.name);
                 if (!entry) {
+                    if (this.pendingFuncs.has(expr.name)) {
+                        throw new TypeError(
+                            `Function '${expr.name}' is referenced before its return type is inferred; add an explicit return type.`,
+                            expr.token
+                        );
+                    }
                     throw new TypeError(`Undefined identifier '${expr.name}'.`, expr.token);
                 }
+                if (entry.type.kind === "Function" && entry.type.hasParens === false) {
+                    return entry.type.returnType;
+                }
                 return entry.type;
+            }
+
+            case "ThisExpr": {
+                if (!this.currentClass) {
+                    throw new TypeError("'this' can only be used inside a class method.", expr.token);
+                }
+                return { kind: "Class", name: this.currentClass.name };
+            }
+
+            case "MemberAccess": {
+                const objType = this.checkExpr(expr.object);
+                const prop = expr.name.lexeme;
+
+                if (objType.kind === "Class") {
+                    const field = this.lookupField(objType.name, prop);
+                    if (field) return field.type;
+
+                    const method = this.lookupMethod(objType.name, prop);
+                    if (method) {
+                        return method.hasParens
+                            ? { kind: "Function", params: method.params, returnType: method.returnType, hasParens: true }
+                            : method.returnType;
+                    }
+
+                    throw new TypeError(`Class '${objType.name}' has no field or method '${prop}'.`, expr.name);
+                }
+
+                const builtin = this.lookupBuiltinMember(objType, prop);
+                if (builtin) return builtin;
+
+                throw new TypeError(`Type '${typeToString(objType)}' has no property or method '${prop}'.`, expr.name);
+            }
+
+            case "FunctionCall": {
+                if (
+                    expr.object.kind === "Identifier" &&
+                    !this.scope.lookup(expr.object.name) &&
+                    this.classes.has(expr.object.name)
+                ) {
+                    const clsName = expr.object.name;
+                    const initMethod = this.lookupMethod(clsName, "init");
+                    const expectedParams = initMethod ? initMethod.params : [];
+                    this.checkCallArgs(expr.args, expectedParams, clsName, expr.token);
+                    return { kind: "Class", name: clsName };
+                }
+
+                const callee = this.checkExpr(expr.object);
+                if (callee.kind !== "Function") {
+                    throw new TypeError(`Cannot call value of non-function type '${typeToString(callee)}'.`, expr.token);
+                }
+
+                this.checkCallArgs(expr.args, callee.params, "function", expr.token);
+                return callee.returnType;
             }
 
             case "Assign": {
@@ -447,7 +855,7 @@ export class TypeChecker {
                         throw new TypeError(`Cannot reassign constant '${expr.target.name}'.`, expr.token);
                     }
                     const valueType = this.checkExpr(expr.value, entry.type);
-                    if (!isAssignable(valueType, entry.type)) {
+                    if (!isAssignable(valueType, entry.type, this.isSubclass)) {
                         throw new TypeError(
                             `Cannot assign '${typeToString(valueType)}' to '${typeToString(entry.type)}'.`,
                             expr.token
@@ -455,6 +863,7 @@ export class TypeChecker {
                     }
                     return valueType;
                 }
+
                 if (expr.target.kind === "Index") {
                     const objType = this.checkExpr(expr.target.object);
                     if (objType.kind === "Primitive" && objType.name === "String") {
@@ -462,7 +871,7 @@ export class TypeChecker {
                     }
                     const slotType = this.checkExpr(expr.target);
                     const valueType = this.checkExpr(expr.value, slotType);
-                    if (!isAssignable(valueType, slotType)) {
+                    if (!isAssignable(valueType, slotType, this.isSubclass)) {
                         throw new TypeError(
                             `Cannot assign '${typeToString(valueType)}' to '${typeToString(slotType)}'.`,
                             expr.token
@@ -470,7 +879,29 @@ export class TypeChecker {
                     }
                     return valueType;
                 }
-                // TODO: Handle MemberAccess and Index assignment targets
+
+                if (expr.target.kind === "MemberAccess") {
+                    const objType = this.checkExpr(expr.target.object);
+                    if (objType.kind !== "Class") {
+                        throw new TypeError(`Cannot assign to property of non-class type '${typeToString(objType)}'.`, expr.token);
+                    }
+                    const prop = expr.target.name.lexeme;
+                    const field = this.lookupField(objType.name, prop);
+                    if (!field) {
+                        throw new TypeError(`Class '${objType.name}' has no mutable field '${prop}'.`, expr.target.name);
+                    }
+                    if (field.isConst) {
+                        throw new TypeError(`Cannot reassign constant field '${prop}'.`, expr.token);
+                    }
+                    const valueType = this.checkExpr(expr.value, field.type);
+                    if (!isAssignable(valueType, field.type, this.isSubclass)) {
+                        throw new TypeError(
+                            `Cannot assign '${typeToString(valueType)}' to '${typeToString(field.type)}'.`,
+                            expr.token
+                        );
+                    }
+                    return valueType;
+                }
                 throw new TypeError(`Assignment to '${expr.target.kind}' is not implemented yet.`, expr.token);
             }
 
@@ -490,7 +921,7 @@ export class TypeChecker {
                         }
                         break;
                     case TokenType.BANG:
-                        if (isAssignable(operand, Types.Boolean)) return Types.Boolean;
+                        if (isAssignable(operand, Types.Boolean, this.isSubclass)) return Types.Boolean;
                         break;
                     case TokenType.TILDE:
                         if (isInteger(operand)) return operand;
@@ -525,7 +956,7 @@ export class TypeChecker {
                 }
 
                 if (objType.kind === "Map") {
-                    if (idxTypes.length !== 1 || !isAssignable(idxTypes[0], objType.key)) {
+                    if (idxTypes.length !== 1 || !isAssignable(idxTypes[0], objType.key, this.isSubclass)) {
                         throw new TypeError(
                             `Map key must be assignable to '${typeToString(objType.key)}'.`,
                             expr.token
@@ -601,6 +1032,16 @@ export class TypeChecker {
                     for (const stmt of expr.statements) {
                         this.checkStmt(stmt);
                     }
+
+                    const last = expr.statements[expr.statements.length - 1];
+                    if (
+                        last?.kind === "ReturnStmt" ||
+                        last?.kind === "BreakStmt" ||
+                        last?.kind === "ContinueStmt"
+                    ) {
+                        return Types.Never;
+                    }
+
                     return expr.returnExpr ? this.checkExpr(expr.returnExpr, expected) : Types.Void;
                 } finally {
                     this.scope = prevScope;
@@ -609,24 +1050,144 @@ export class TypeChecker {
 
             case "If": {
                 const condType = this.checkExpr(expr.condition, Types.Boolean);
-                if (!isAssignable(condType, Types.Boolean)) {
-                    throw new TypeError(`Condition of 'if' must be Boolean, got '${typeToString(condType)}'.`);
+                if (!isAssignable(condType, Types.Boolean, this.isSubclass)) {
+                    throw new TypeError(
+                        `Condition of 'if' must be Boolean, got '${typeToString(condType)}'.`,
+                        expr.token
+                    );
                 }
 
                 const successType = this.checkExpr(expr.success, expected);
                 if (!expr.fail) return Types.Void;
 
                 const failType = this.checkExpr(expr.fail, expected ?? successType);
-                if (isAssignable(failType, successType)) return successType;
-                if (isAssignable(successType, failType)) return failType;
+                const merged = commonType(successType, failType, this.isSubclass);
+                if (!merged) {
+                    throw new TypeError(
+                        `Incompatible 'if' branch types: '${typeToString(successType)}' vs '${typeToString(failType)}'.`,
+                        expr.token
+                    );
+                }
+                return merged;
+            }
 
+            case "While": {
+                const condType = this.checkExpr(expr.condition, Types.Boolean);
+                if (!isAssignable(condType, Types.Boolean, this.isSubclass)) {
+                    throw new TypeError(
+                        `Condition of 'while' must be Boolean, got '${typeToString(condType)}'.`,
+                        expr.token
+                    );
+                }
+
+                const loop: LoopContext = {
+                    expectedValue: unwrapOptional(expected),
+                    breakTypes: [],
+                    hasBareBreak: false,
+                };
+                this.loopStack.push(loop);
+                try {
+                    this.checkExpr(expr.block);
+                } finally {
+                    this.loopStack.pop();
+                }
+
+                return this.resolveLoopType(loop, expr.token);
+            }
+
+            case "For": {
+                const iterableType = this.checkExpr(expr.expr);
+                const elemType = this.getIterableElementType(iterableType, expr.token);
+
+                const prevScope = this.scope;
+                this.scope = new Scope(prevScope);
+                const loop: LoopContext = {
+                    expectedValue: unwrapOptional(expected),
+                    breakTypes: [],
+                    hasBareBreak: false,
+                };
+                this.loopStack.push(loop);
+
+                try {
+                    if (expr.identifier.type !== TokenType.UNDERLINE) {
+                        this.scope.define(expr.identifier.lexeme, { type: elemType, isConst: true });
+                    }
+                    this.checkExpr(expr.block);
+                } finally {
+                    this.loopStack.pop();
+                    this.scope = prevScope;
+                }
+
+                return this.resolveLoopType(loop, expr.token);
+            }
+
+            case "Match": {
+                const subjectType = this.checkExpr(expr.expr);
+                if (expr.arms.length === 0) return Types.Void;
+
+                let resultType: Type | undefined;
+
+                for (const arm of expr.arms) {
+                    for (const pat of arm.patterns) {
+                        if (pat.kind === "Wildcard") {
+                            this.exprTypes.set(pat, subjectType);
+                            continue;
+                        }
+
+                        const patType = this.checkExpr(pat, subjectType);
+                        if (!isAssignable(patType, subjectType, this.isSubclass)) {
+                            throw new TypeError(
+                                `Pattern of type '${typeToString(patType)}' cannot match value of type '${typeToString(subjectType)}'.`,
+                                expr.token
+                            );
+                        }
+                    }
+
+                    const armType = this.checkExpr(arm.success, expected);
+                    if (!resultType) {
+                        resultType = armType;
+                    } else {
+                        const merged = commonType(resultType, armType, this.isSubclass);
+                        if (!merged) {
+                            throw new TypeError(
+                                `Incompatible 'match' arm types: '${typeToString(resultType)}' and '${typeToString(armType)}'.`,
+                                expr.token
+                            );
+                        }
+                        resultType = merged;
+                    }
+                }
+
+                if (!resultType) return Types.Void;
+
+                const exhaustive = this.isMatchExhaustive(subjectType, expr.arms);
+                if (!exhaustive) {
+                    if (
+                        resultType.kind === "Primitive" &&
+                        (resultType.name === "Void" || resultType.name === "Never")
+                    ) {
+                        return Types.Void;
+                    }
+                    throw new TypeError(
+                        "Non-exhaustive 'match' expression producing a value; add a wildcard '_' arm.",
+                        expr.token
+                    );
+                }
+
+                return resultType;
+            }
+
+            case "Wildcard": {
                 throw new TypeError(
-                    `Incompatible 'if' branch types: '${typeToString(successType)}' vs '${typeToString(failType)}'.`
+                    "Wildcard '_' can only be used in 'match' patterns or 'for' loop bindings.",
+                    expr.token
                 );
             }
 
-            default:
-                throw new TypeError(`Type checking for expression '${expr.kind}' is not implemented yet.`);
+            default: {
+                const _exhaustive: never = expr;
+                throw new TypeError(`Unhandled expression kind: ${(_exhaustive as Expr).kind}`);
+            }
         }
     }
 
@@ -690,7 +1251,7 @@ export class TypeChecker {
                     break;
 
                 case TokenType.IDENT:
-                    // TODO: Verify class exists in a class registry
+                    if (!this.classes.has(node.name.lexeme)) throw new TypeError(`Unknown type '${node.name.lexeme}'.`, node.name);
                     base = { kind: "Class", name: node.name.lexeme };
                     break;
 
@@ -700,5 +1261,109 @@ export class TypeChecker {
         }
 
         return node.optional ? optionalOf(base) : base;
+    }
+
+    private resolveLoopType(loop: LoopContext, token: Token): Type {
+        if (loop.breakTypes.length === 0) {
+            return Types.Void;
+        }
+
+        if (loop.hasBareBreak) {
+            throw new TypeError(
+                "Cannot mix bare 'break;' and 'break <value>;' in the same loop.",
+                token
+            );
+        }
+
+        let merged = loop.breakTypes[0];
+        for (let i = 1; i < loop.breakTypes.length; i++) {
+            const next = commonType(merged, loop.breakTypes[i], this.isSubclass);
+            if (!next) {
+                throw new TypeError(
+                    `Incompatible 'break' value types in loop: '${typeToString(merged)}' and '${typeToString(loop.breakTypes[i])}'.`,
+                    token
+                );
+            }
+            merged = next;
+        }
+
+        return optionalOf(merged);
+    }
+
+    private getIterableElementType(iterable: Type, token: Token): Type {
+        switch (iterable.kind) {
+            case "List":
+            case "Set":
+            case "Vector":
+                return iterable.element;
+            case "Matrix":
+                return { kind: "Vector", element: iterable.element };
+            case "Map":
+                return iterable.key;
+            case "Primitive":
+                if (iterable.name === "String") return Types.String;
+                break;
+        }
+
+        throw new TypeError(
+            `Type '${typeToString(iterable)}' is not iterable in a 'for' loop.`,
+            token
+        );
+    }
+
+    private isMatchExhaustive(
+        subjectType: Type,
+        arms: readonly { readonly patterns: readonly Expr[]; readonly success: Expr }[]
+    ): boolean {
+        let hasTrue = false;
+        let hasFalse = false;
+
+        for (const arm of arms) {
+            for (const pat of arm.patterns) {
+                if (pat.kind === "Wildcard") return true;
+                if (pat.kind === "BooleanLit") {
+                    if (pat.value) hasTrue = true;
+                    else hasFalse = true;
+                }
+            }
+        }
+
+        return (
+            subjectType.kind === "Primitive" &&
+            subjectType.name === "Boolean" &&
+            hasTrue &&
+            hasFalse
+        );
+    }
+
+    private isSubclass = (sub: string, sup: string): boolean => {
+        let curr = this.classes.get(sub)?.parent;
+        while (curr) {
+            if (curr === sup) return true;
+            curr = this.classes.get(curr)?.parent;
+        }
+        return false;
+    };
+
+    private lookupField(className: string, fieldName: string): FieldInfo | undefined {
+        let curr: string | undefined = className;
+        while (curr) {
+            const cls = this.classes.get(curr);
+            const field = cls?.fields.get(fieldName);
+            if (field) return field;
+            curr = cls?.parent;
+        }
+        return undefined;
+    }
+
+    private lookupMethod(className: string, methodName: string): MethodInfo | undefined {
+        let curr: string | undefined = className;
+        while (curr) {
+            const cls = this.classes.get(curr);
+            const method = cls?.methods.get(methodName);
+            if (method) return method;
+            curr = cls?.parent;
+        }
+        return undefined;
     }
 }
