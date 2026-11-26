@@ -1,4 +1,4 @@
-import { Token, TokenType, KEYWORDS } from "./token";
+import { Token, TokenType, KEYWORDS } from "./token.js";
 
 // Trampoline types for stack-safe tail recursion
 type TailCall<T> = { readonly done: true; readonly value: T }
@@ -218,7 +218,7 @@ function isIdentifierStart(ch: string): boolean {
 
 function readIdentifier(state: LexerState): LexerState {
   let i = state.index;
-  while (i < state.source.length && /^[a-zA-Z0-9_\u0370-\u03FF]$/.test(state.source[i])) {
+  while (i < state.source.length && isIdentifierPart(state.source[i])) {
     i++;
   }
   const lexeme = state.source.slice(state.index, i);

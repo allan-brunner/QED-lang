@@ -1,5 +1,5 @@
-import { Token, TokenType } from "./token";
-import { Expr, FuncParam, Stmt, TypeNode } from "./ast";
+import { Token, TokenType } from "./token.js";
+import { Expr, FuncParam, Stmt, TypeNode } from "./ast.js";
 
 enum Precedence {
   LOGIC_OR = 1,

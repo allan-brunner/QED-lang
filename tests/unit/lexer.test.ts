@@ -263,3 +263,50 @@ describe("Lexer - Strings, Comments, Positions & Error Handling", () => {
     expect(() => tokenize("@foo")).toThrow(/Unexpected character '@'/);
   });
 });
+
+describe("Lexer - Edge Cases & Regressions", () => {
+  it("treats Object.prototype property names as normal identifiers", () => {
+    const tokens = tokenize("toString constructor valueOf hasOwnProperty");
+    expect(tokens.map((t) => [t.type, t.lexeme])).toEqual([
+      [TokenType.IDENT, "toString"],
+      [TokenType.IDENT, "constructor"],
+      [TokenType.IDENT, "valueOf"],
+      [TokenType.IDENT, "hasOwnProperty"],
+      [TokenType.EOF, ""],
+    ]);
+  });
+
+  it("handles scientific-like implicit multiplication (2e+x) and rejects dangling signs (1.5e-)", () => {
+    expect(tokenize("2e+x").map((t) => [t.type, t.lexeme])).toEqual([
+      [TokenType.INT_LIT, "2"],
+      [TokenType.IDENT, "e"],
+      [TokenType.PLUS, "+"],
+      [TokenType.IDENT, "x"],
+      [TokenType.EOF, ""],
+    ]);
+    expect(() => tokenize("1.5e-")).toThrow(/Invalid scientific notation/);
+  });
+
+  it("handles member access on float and complex literals (3.14.abs, 4i.re)", () => {
+    expect(tokenize("3.14.abs 4i.re").map((t) => [t.type, t.lexeme])).toEqual([
+      [TokenType.FLOAT_LIT, "3.14"],
+      [TokenType.DOT, "."],
+      [TokenType.IDENT, "abs"],
+      [TokenType.COMPLEX_LIT, "4i"],
+      [TokenType.DOT, "."],
+      [TokenType.IDENT, "re"],
+      [TokenType.EOF, ""],
+    ]);
+  });
+
+  it("handles escaped backslashes before closing quotes and CRLF line continuations", () => {
+    const escapedBackslash = tokenize('"abc\\\\" x');
+    expect(escapedBackslash[0]).toMatchObject({ type: TokenType.STRING_LIT, lexeme: '"abc\\\\"' });
+    expect(escapedBackslash[1]).toMatchObject({ type: TokenType.IDENT, lexeme: "x" });
+
+    const crlfContinuation = tokenize('"a\\\r\nb" y');
+    expect(crlfContinuation[1]).toMatchObject({ lexeme: "y", line: 2, column: 4 });
+
+    expect(() => tokenize('"unclosed\\')).toThrow(/Unclosed string/);
+  });
+});

@@ -4,7 +4,7 @@ import { Scope, SymbolEntry } from "./scope.js";
 import { Type, Types, commonType, isAssignable, isInteger, isNumeric, isOrdered, isOrderedNumeric, optionalOf, promoteInteger, promoteNumeric, typeEquals, typeToString, unwrapOptional } from "./types.js";
 import { BUILTIN_MODULES, lookupBuiltinMember } from "./builtins.js";
 
-export class TypeError extends Error {
+export class TypeCheckError extends Error {
     constructor(message: string, public readonly token?: Token) {
         const loc = token ? ` at ${token.line}:${token.column}` : "";
         super(`Type error${loc}: ${message}`);
@@ -42,7 +42,7 @@ interface FieldInfo {
 
 interface MethodInfo {
     readonly params: readonly Type[];
-    readonly returnType: Type;
+    readonly returnType?: Type;
     readonly hasParens: boolean;
 }
 
@@ -61,7 +61,7 @@ export class TypeChecker {
     private readonly loadingModules: Set<string>;
     private readonly importedPaths = new Set<string>();
 
-    private readonly loopStack: LoopContext[] = [];
+    private loopStack: LoopContext[] = [];
     private readonly funcStack: FuncContext[] = [];
 
     private readonly classes = new Map<string, ClassInfo>();
@@ -94,7 +94,7 @@ export class TypeChecker {
             if (stmt.kind !== "ClassDecl") continue;
             const name = stmt.identifier.lexeme;
             if (this.classes.has(name)) {
-                throw new TypeError(`Class '${name}' is already declared.`, stmt.identifier);
+                throw new TypeCheckError(`Class '${name}' is already declared.`, stmt.identifier);
             }
             this.classes.set(name, { name, fields: new Map(), methods: new Map() });
         }
@@ -105,7 +105,7 @@ export class TypeChecker {
             const parentName = stmt.inherits.lexeme;
 
             if (!this.classes.has(parentName)) {
-                throw new TypeError(`Superclass '${parentName}' is not defined.`, stmt.inherits);
+                throw new TypeCheckError(`Superclass '${parentName}' is not defined.`, stmt.inherits);
             }
             cls.parent = parentName;
 
@@ -113,7 +113,7 @@ export class TypeChecker {
             let cursor: string | undefined = parentName;
             while (cursor) {
                 if (cursor === cls.name) {
-                    throw new TypeError(`Circular inheritance detected involving '${cls.name}'.`, stmt.inherits);
+                    throw new TypeCheckError(`Circular inheritance detected involving '${cls.name}'.`, stmt.inherits);
                 }
                 cursor = this.classes.get(cursor)?.parent;
             }
@@ -139,7 +139,7 @@ export class TypeChecker {
             for (const [name, entry] of builtin) {
                 const existing = this.scope.lookup(name);
                 if (existing && existing !== entry) {
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         `Import '${importPath}' conflicts with existing symbol '${name}'.`,
                         stmt.path
                     );
@@ -152,18 +152,18 @@ export class TypeChecker {
         }
 
         if (!this.moduleLoader) {
-            throw new TypeError(`Unknown module '${importPath}'.`, stmt.path);
+            throw new TypeCheckError(`Unknown module '${importPath}'.`, stmt.path);
         }
 
         if (this.loadingModules.has(importPath)) {
-            throw new TypeError(`Circular import detected involving '${importPath}'.`, stmt.path);
+            throw new TypeCheckError(`Circular import detected involving '${importPath}'.`, stmt.path);
         }
 
         let exports = this.moduleCache.get(importPath);
         if (!exports) {
             const ast = this.moduleLoader(importPath);
             if (!ast) {
-                throw new TypeError(`Cannot resolve module '${importPath}'.`, stmt.path);
+                throw new TypeCheckError(`Cannot resolve module '${importPath}'.`, stmt.path);
             }
 
             this.loadingModules.add(importPath);
@@ -187,7 +187,7 @@ export class TypeChecker {
         for (const [name, clsInfo] of exports.classes) {
             const existing = this.classes.get(name);
             if (existing && existing !== clsInfo) {
-                throw new TypeError(
+                throw new TypeCheckError(
                     `Import '${importPath}' conflicts with existing class '${name}'.`,
                     stmt.path
                 );
@@ -198,7 +198,7 @@ export class TypeChecker {
         for (const [name, entry] of exports.symbols) {
             const existing = this.scope.lookup(name);
             if (existing && existing !== entry) {
-                throw new TypeError(
+                throw new TypeCheckError(
                     `Import '${importPath}' conflicts with existing symbol '${name}'.`,
                     stmt.path
                 );
@@ -212,7 +212,7 @@ export class TypeChecker {
     private resolveFuncParams(stmt: Extract<Stmt, { kind: "FuncDecl" }>): Type[] {
         return stmt.params.map((p) => {
             if (!p.typeAnnotation) {
-                throw new TypeError(
+                throw new TypeCheckError(
                     `Parameter '${p.name.lexeme}' of function '${stmt.identifier.lexeme}' requires a type annotation.`,
                     p.name
                 );
@@ -225,8 +225,12 @@ export class TypeChecker {
         const name = stmt.identifier.lexeme;
         const params = this.resolveFuncParams(stmt);
 
+        if (this.pendingFuncs.has(name) || this.scope.hasOwn(name)) {
+            throw new TypeCheckError(`Function '${name}' is already declared in this scope.`, stmt.identifier);
+        }
+
         if (!stmt.returnType) {
-            this.pendingFuncs.add(name);
+            this.scope.addPendingFunc(name);
             return;
         }
 
@@ -238,7 +242,7 @@ export class TypeChecker {
         };
 
         if (!this.scope.define(name, { type: fnType, isConst: true })) {
-            throw new TypeError(`Function '${name}' is already declared in this scope.`, stmt.identifier);
+            throw new TypeCheckError(`Function '${name}' is already declared in this scope.`, stmt.identifier);
         }
     }
 
@@ -249,7 +253,7 @@ export class TypeChecker {
             if (member.kind === "VarDecl" && member.typeAnnotation) {
                 const fieldName = member.name.lexeme;
                 if (cls.fields.has(fieldName) || cls.methods.has(fieldName)) {
-                    throw new TypeError(`Duplicate member '${fieldName}' in class '${cls.name}'.`, member.name);
+                    throw new TypeCheckError(`Duplicate member '${fieldName}' in class '${cls.name}'.`, member.name);
                 }
                 cls.fields.set(fieldName, {
                     type: this.resolveTypeNode(member.typeAnnotation),
@@ -258,7 +262,7 @@ export class TypeChecker {
             } else if (member.kind === "FuncDecl") {
                 const methodName = member.identifier.lexeme;
                 if (cls.fields.has(methodName) || cls.methods.has(methodName)) {
-                    throw new TypeError(`Duplicate member '${methodName}' in class '${cls.name}'.`, member.identifier);
+                    throw new TypeCheckError(`Duplicate member '${methodName}' in class '${cls.name}'.`, member.identifier);
                 }
                 const params = this.resolveFuncParams(member);
                 const returnType = member.returnType ? this.resolveTypeNode(member.returnType) : Types.Void;
@@ -281,14 +285,14 @@ export class TypeChecker {
                 const initType = this.checkExpr(stmt.initializer, expected);
 
                 if (expected && !isAssignable(initType, expected, this.isSubclass)) {
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         `Cannot assign '${typeToString(initType)}' to '${stmt.name.lexeme}' of type '${typeToString(expected)}'.`,
                         stmt.name
                     );
                 }
 
                 if (!expected && initType.kind === "Primitive" && initType.name === "None") {
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         `Cannot infer type of '${stmt.name.lexeme}' from 'None'; add an explicit type annotation.`,
                         stmt.name
                     );
@@ -296,7 +300,7 @@ export class TypeChecker {
 
                 const varType = expected ?? initType;
                 if (!this.scope.define(stmt.name.lexeme, { type: varType, isConst: stmt.isConst })) {
-                    throw new TypeError(`Variable '${stmt.name.lexeme}' is already declared in this scope.`, stmt.name);
+                    throw new TypeCheckError(`Variable '${stmt.name.lexeme}' is already declared in this scope.`, stmt.name);
                 }
                 return;
             }
@@ -307,7 +311,7 @@ export class TypeChecker {
 
             case "ContinueStmt": {
                 if (this.loopStack.length === 0) {
-                    throw new TypeError("'continue' can only be used inside a loop.", stmt.token);
+                    throw new TypeCheckError("'continue' can only be used inside a loop.", stmt.token);
                 }
                 return;
             }
@@ -315,7 +319,7 @@ export class TypeChecker {
             case "BreakStmt": {
                 const loop = this.loopStack[this.loopStack.length - 1];
                 if (!loop) {
-                    throw new TypeError("'break' can only be used inside a loop.", stmt.token);
+                    throw new TypeCheckError("'break' can only be used inside a loop.", stmt.token);
                 }
 
                 if (!stmt.returned) {
@@ -325,7 +329,7 @@ export class TypeChecker {
 
                 const valType = this.checkExpr(stmt.returned, loop.expectedValue);
                 if (loop.expectedValue && !isAssignable(valType, loop.expectedValue, this.isSubclass)) {
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         `Cannot break with '${typeToString(valType)}'; expected '${typeToString(loop.expectedValue)}'.`,
                         stmt.token
                     );
@@ -337,7 +341,7 @@ export class TypeChecker {
             case "ReturnStmt": {
                 const fn = this.funcStack[this.funcStack.length - 1];
                 if (!fn) {
-                    throw new TypeError("'return' can only be used inside a function.", stmt.token);
+                    throw new TypeCheckError("'return' can only be used inside a function.", stmt.token);
                 }
 
                 const retType = stmt.returned
@@ -346,7 +350,7 @@ export class TypeChecker {
 
                 if (fn.declaredReturn) {
                     if (!isAssignable(retType, fn.declaredReturn, this.isSubclass)) {
-                        throw new TypeError(
+                        throw new TypeCheckError(
                             `Cannot return '${typeToString(retType)}' from function returning '${typeToString(fn.declaredReturn)}'.`,
                             stmt.token
                         );
@@ -363,6 +367,9 @@ export class TypeChecker {
             }
 
             case "ClassDecl": {
+                if (this.scope.parent !== undefined) {
+                    throw new TypeCheckError("'class' declarations are only allowed at the top level.", stmt.identifier);
+                }
                 const cls = this.classes.get(stmt.identifier.lexeme)!;
                 const prevClass = this.currentClass;
                 this.currentClass = cls;
@@ -375,7 +382,7 @@ export class TypeChecker {
                             const expected = cls.fields.get(member.name.lexeme)!.type;
                             const initType = this.checkExpr(member.initializer, expected);
                             if (!isAssignable(initType, expected, this.isSubclass)) {
-                                throw new TypeError(
+                                throw new TypeCheckError(
                                     `Cannot assign '${typeToString(initType)}' to field '${member.name.lexeme}' of type '${typeToString(expected)}'.`,
                                     member.name
                                 );
@@ -383,11 +390,11 @@ export class TypeChecker {
                         } else {
                             const fieldName = member.name.lexeme;
                             if (cls.fields.has(fieldName) || cls.methods.has(fieldName)) {
-                                throw new TypeError(`Duplicate member '${fieldName}' in class '${cls.name}'.`, member.name);
+                                throw new TypeCheckError(`Duplicate member '${fieldName}' in class '${cls.name}'.`, member.name);
                             }
                             const initType = this.checkExpr(member.initializer);
                             if (initType.kind === "Primitive" && initType.name === "None") {
-                                throw new TypeError(
+                                throw new TypeCheckError(
                                     `Cannot infer type of field '${fieldName}' from 'None'; add an explicit type annotation.`,
                                     member.name
                                 );
@@ -409,14 +416,14 @@ export class TypeChecker {
 
             case "ImportDecl": {
                 if (this.scope.parent !== undefined) {
-                    throw new TypeError("'import' statements are only allowed at the top level.", stmt.path);
+                    throw new TypeCheckError("'import' statements are only allowed at the top level.", stmt.path);
                 }
                 return;
             }
 
             default: {
                 const _exhaustive: never = stmt;
-                throw new TypeError(`Unhandled statement kind: ${(_exhaustive as Stmt).kind}`);
+                throw new TypeCheckError(`Unhandled statement kind: ${(_exhaustive as Stmt).kind}`);
             }
         }
     }
@@ -432,10 +439,12 @@ export class TypeChecker {
         this.funcStack.push(fnCtx);
 
         let bodyType: Type;
+        const prevLoops = this.loopStack;
+        this.loopStack = [];
         try {
             stmt.params.forEach((param, i) => {
                 if (!this.scope.define(param.name.lexeme, { type: paramTypes[i], isConst: true })) {
-                    throw new TypeError(`Duplicate parameter '${param.name.lexeme}'.`, param.name);
+                    throw new TypeCheckError(`Duplicate parameter '${param.name.lexeme}'.`, param.name);
                 }
             });
 
@@ -443,11 +452,12 @@ export class TypeChecker {
         } finally {
             this.funcStack.pop();
             this.scope = prevScope;
+            this.loopStack = prevLoops;
         }
 
         if (declaredReturn) {
             if (!isAssignable(bodyType, declaredReturn, this.isSubclass)) {
-                throw new TypeError(
+                throw new TypeCheckError(
                     `Function '${name}' declared return type '${typeToString(declaredReturn)}', but body evaluates to '${typeToString(bodyType)}'.`,
                     stmt.identifier
                 );
@@ -466,7 +476,7 @@ export class TypeChecker {
             for (let i = 1; i < allReturns.length; i++) {
                 const merged = commonType(inferred, allReturns[i], this.isSubclass);
                 if (!merged) {
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         `Incompatible return types in function '${name}': '${typeToString(inferred)}' and '${typeToString(allReturns[i])}'.`,
                         stmt.identifier
                     );
@@ -482,11 +492,15 @@ export class TypeChecker {
                 hasParens: stmt.hasParens ?? true,
             });
         } else {
-            this.pendingFuncs.delete(name);
-            this.scope.define(name, {
-                type: { kind: "Function", params: paramTypes, returnType: inferred, hasParens: stmt.hasParens ?? true },
-                isConst: true,
-            });
+            prevScope.deletePendingFunc(name);
+            if (
+                !prevScope.define(name, {
+                    type: { kind: "Function", params: paramTypes, returnType: inferred, hasParens: stmt.hasParens ?? true },
+                    isConst: true,
+                })
+            ) {
+                throw new TypeCheckError(`Function '${name}' is already declared in this scope.`, stmt.identifier);
+            }
         }
     }
 
@@ -498,7 +512,7 @@ export class TypeChecker {
 
     private checkBinary(op: Token, left: Type, right: Type): Type {
         const fail = (): never => {
-            throw new TypeError(
+            throw new TypeCheckError(
                 `Operator '${op.lexeme}' cannot be applied to '${typeToString(left)}' and '${typeToString(right)}'.`,
                 op
             );
@@ -690,7 +704,7 @@ export class TypeChecker {
             for (const el of elements) {
                 const elType = this.checkExpr(el, expectedElem);
                 if (!isAssignable(elType, expectedElem, this.isSubclass)) {
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         `${kind} element of type '${typeToString(elType)}' is not assignable to '${typeToString(expectedElem)}'.`,
                         token
                     );
@@ -708,7 +722,7 @@ export class TypeChecker {
             } else {
                 const merged = commonType(acc, elType, this.isSubclass);
                 if (!merged) {
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         `Incompatible ${kind} element types: '${typeToString(acc)}' and '${typeToString(elType)}'.`,
                         token
                     );
@@ -726,7 +740,7 @@ export class TypeChecker {
         token: Token
     ): void {
         if (args.length !== expectedParams.length) {
-            throw new TypeError(
+            throw new TypeCheckError(
                 `Expected ${expectedParams.length} argument(s) for '${label}', got ${args.length}.`,
                 token
             );
@@ -734,7 +748,7 @@ export class TypeChecker {
         for (let i = 0; i < args.length; i++) {
             const argType = this.checkExpr(args[i], expectedParams[i]);
             if (!isAssignable(argType, expectedParams[i], this.isSubclass)) {
-                throw new TypeError(
+                throw new TypeCheckError(
                     `Argument ${i + 1} of '${label}': cannot assign '${typeToString(argType)}' to '${typeToString(expectedParams[i])}'.`,
                     token
                 );
@@ -766,16 +780,16 @@ export class TypeChecker {
             const target = unwrapOptional(expected);
             if (expr.args.length === 0) {
                 if (target?.kind === "Map") return target;
-                throw new TypeError("Cannot infer types of empty 'Map()'; add a type annotation.", expr.token);
+                throw new TypeCheckError("Cannot infer types of empty 'Map()'; add a type annotation.", expr.token);
             }
             if (expr.args.length === 1) {
                 const src = this.checkExpr(expr.args[0], target?.kind === "Map" ? target : undefined);
                 if (src.kind !== "Map") {
-                    throw new TypeError(`'Map()' expects a Map argument, got '${typeToString(src)}'.`, expr.token);
+                    throw new TypeCheckError(`'Map()' expects a Map argument, got '${typeToString(src)}'.`, expr.token);
                 }
                 return src;
             }
-            throw new TypeError(`'Map()' takes at most 1 argument, got ${expr.args.length}.`, expr.token);
+            throw new TypeCheckError(`'Map()' takes at most 1 argument, got ${expr.args.length}.`, expr.token);
         }
 
         if (name === "List" || name === "Set" || name === "Deque" || name === "Heap") {
@@ -784,7 +798,7 @@ export class TypeChecker {
 
             if (expr.args.length === 0) {
                 if (expectedElem) return this.makeUnaryCollection(name, expectedElem);
-                throw new TypeError(
+                throw new TypeCheckError(
                     `Cannot infer element type of empty '${name}()'; add a type annotation.`,
                     expr.token
                 );
@@ -799,7 +813,7 @@ export class TypeChecker {
                 const elemType = this.getIterableElementType(srcType, expr.token);
 
                 if (name === "Heap" && !isOrdered(elemType)) {
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         `Heap element type must be orderable, got '${typeToString(elemType)}'.`,
                         expr.token
                     );
@@ -808,7 +822,7 @@ export class TypeChecker {
                 return this.makeUnaryCollection(name, elemType);
             }
 
-            throw new TypeError(`'${name}()' takes at most 1 argument, got ${expr.args.length}.`, expr.token);
+            throw new TypeCheckError(`'${name}()' takes at most 1 argument, got ${expr.args.length}.`, expr.token);
         }
 
         return undefined;
@@ -819,7 +833,7 @@ export class TypeChecker {
         for (const cell of cells) {
             const cellType = this.checkExpr(cell);
             if (!isNumeric(cellType)) {
-                throw new TypeError(
+                throw new TypeCheckError(
                     `${kind} elements must be numeric, got '${typeToString(cellType)}'.`,
                     token
                 );
@@ -840,8 +854,9 @@ export class TypeChecker {
             case "Grouping": return this.checkExpr(expr.expr, expected);
 
             case "VectorLit": {
+                const target = unwrapOptional(expected);
                 if (expr.elements.length === 0) {
-                    if (expected?.kind === "Vector") return expected;
+                    if (target?.kind === "Vector") return target;
                     return { kind: "Vector", element: Types.Double };
                 }
                 const element = this.promoteNumericCells(expr.elements, "Vector", expr.token);
@@ -859,7 +874,7 @@ export class TypeChecker {
 
                 if (expr.elements.length === 0) {
                     if (expectedElem) return { kind: "List", element: expectedElem };
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         "Cannot infer element type of empty list '[]'; add a type annotation.",
                         expr.token
                     );
@@ -879,8 +894,8 @@ export class TypeChecker {
                     !isOrderedNumeric(endType) ||
                     (stepType && !isOrderedNumeric(stepType))
                 ) {
-                    throw new TypeError(
-                        "Dynamic list bounds and step must be real numeric types (Int, BigInt, Float, Double)."
+                    throw new TypeCheckError(
+                        "Dynamic list bounds and step must be real numeric types (Int, BigInt, Float, Double).", expr.token
                     );
                 }
 
@@ -913,7 +928,7 @@ export class TypeChecker {
 
                     if (expectedKey) {
                         if (!isAssignable(k, expectedKey, this.isSubclass)) {
-                            throw new TypeError(
+                            throw new TypeCheckError(
                                 `Map key of type '${typeToString(k)}' is not assignable to '${typeToString(expectedKey)}'.`,
                                 expr.token
                             );
@@ -923,7 +938,7 @@ export class TypeChecker {
                     } else {
                         const mergedK = commonType(keyType, k, this.isSubclass);
                         if (!mergedK) {
-                            throw new TypeError(
+                            throw new TypeCheckError(
                                 `Incompatible Map key types: '${typeToString(keyType)}' and '${typeToString(k)}'.`,
                                 expr.token
                             );
@@ -933,7 +948,7 @@ export class TypeChecker {
 
                     if (expectedVal) {
                         if (!isAssignable(v, expectedVal, this.isSubclass)) {
-                            throw new TypeError(
+                            throw new TypeCheckError(
                                 `Map value of type '${typeToString(v)}' is not assignable to '${typeToString(expectedVal)}'.`,
                                 expr.token
                             );
@@ -943,7 +958,7 @@ export class TypeChecker {
                     } else {
                         const mergedV = commonType(valType, v, this.isSubclass);
                         if (!mergedV) {
-                            throw new TypeError(
+                            throw new TypeCheckError(
                                 `Incompatible Map value types: '${typeToString(valType)}' and '${typeToString(v)}'.`,
                                 expr.token
                             );
@@ -958,13 +973,13 @@ export class TypeChecker {
             case "Identifier": {
                 const entry = this.scope.lookup(expr.name);
                 if (!entry) {
-                    if (this.pendingFuncs.has(expr.name)) {
-                        throw new TypeError(
+                    if (this.scope.hasPendingFunc(expr.name)) {
+                        throw new TypeCheckError(
                             `Function '${expr.name}' is referenced before its return type is inferred; add an explicit return type.`,
                             expr.token
                         );
                     }
-                    throw new TypeError(`Undefined identifier '${expr.name}'.`, expr.token);
+                    throw new TypeCheckError(`Undefined identifier '${expr.name}'.`, expr.token);
                 }
                 if (entry.type.kind === "Function" && entry.type.hasParens === false) {
                     return entry.type.returnType;
@@ -974,7 +989,7 @@ export class TypeChecker {
 
             case "ThisExpr": {
                 if (!this.currentClass) {
-                    throw new TypeError("'this' can only be used inside a class method.", expr.token);
+                    throw new TypeCheckError("'this' can only be used inside a class method.", expr.token);
                 }
                 return { kind: "Class", name: this.currentClass.name };
             }
@@ -989,18 +1004,20 @@ export class TypeChecker {
 
                     const method = this.lookupMethod(objType.name, prop);
                     if (method) {
+                        if (method.returnType === undefined)
+                            throw new TypeCheckError(`Method '${prop}' is referenced before its return type is inferred; add an explicit return type.`);
                         return method.hasParens
                             ? { kind: "Function", params: method.params, returnType: method.returnType, hasParens: true }
                             : method.returnType;
                     }
 
-                    throw new TypeError(`Class '${objType.name}' has no field or method '${prop}'.`, expr.name);
+                    throw new TypeCheckError(`Class '${objType.name}' has no field or method '${prop}'.`, expr.name);
                 }
 
                 const builtin = lookupBuiltinMember(objType, prop);
                 if (builtin) return builtin;
 
-                throw new TypeError(`Type '${typeToString(objType)}' has no property or method '${prop}'.`, expr.name);
+                throw new TypeCheckError(`Type '${typeToString(objType)}' has no property or method '${prop}'.`, expr.name);
             }
 
             case "FunctionCall": {
@@ -1020,7 +1037,7 @@ export class TypeChecker {
 
                 const callee = this.checkExpr(expr.object);
                 if (callee.kind !== "Function") {
-                    throw new TypeError(`Cannot call value of non-function type '${typeToString(callee)}'.`, expr.token);
+                    throw new TypeCheckError(`Cannot call value of non-function type '${typeToString(callee)}'.`, expr.token);
                 }
 
                 this.checkCallArgs(expr.args, callee.params, "function", expr.token);
@@ -1031,14 +1048,14 @@ export class TypeChecker {
                 if (expr.target.kind === "Identifier") {
                     const entry = this.scope.lookup(expr.target.name);
                     if (!entry) {
-                        throw new TypeError(`Undefined variable '${expr.target.name}'.`, expr.target.token);
+                        throw new TypeCheckError(`Undefined variable '${expr.target.name}'.`, expr.target.token);
                     }
                     if (entry.isConst) {
-                        throw new TypeError(`Cannot reassign constant '${expr.target.name}'.`, expr.token);
+                        throw new TypeCheckError(`Cannot reassign constant '${expr.target.name}'.`, expr.token);
                     }
                     const valueType = this.checkExpr(expr.value, entry.type);
                     if (!isAssignable(valueType, entry.type, this.isSubclass)) {
-                        throw new TypeError(
+                        throw new TypeCheckError(
                             `Cannot assign '${typeToString(valueType)}' to '${typeToString(entry.type)}'.`,
                             expr.token
                         );
@@ -1049,12 +1066,12 @@ export class TypeChecker {
                 if (expr.target.kind === "Index") {
                     const objType = this.checkExpr(expr.target.object);
                     if (objType.kind === "Primitive" && objType.name === "String") {
-                        throw new TypeError("Cannot mutate a String by index.", expr.token);
+                        throw new TypeCheckError("Cannot mutate a String by index.", expr.token);
                     }
                     const slotType = this.checkExpr(expr.target);
                     const valueType = this.checkExpr(expr.value, slotType);
                     if (!isAssignable(valueType, slotType, this.isSubclass)) {
-                        throw new TypeError(
+                        throw new TypeCheckError(
                             `Cannot assign '${typeToString(valueType)}' to '${typeToString(slotType)}'.`,
                             expr.token
                         );
@@ -1065,26 +1082,26 @@ export class TypeChecker {
                 if (expr.target.kind === "MemberAccess") {
                     const objType = this.checkExpr(expr.target.object);
                     if (objType.kind !== "Class") {
-                        throw new TypeError(`Cannot assign to property of non-class type '${typeToString(objType)}'.`, expr.token);
+                        throw new TypeCheckError(`Cannot assign to property of non-class type '${typeToString(objType)}'.`, expr.token);
                     }
                     const prop = expr.target.name.lexeme;
                     const field = this.lookupField(objType.name, prop);
                     if (!field) {
-                        throw new TypeError(`Class '${objType.name}' has no mutable field '${prop}'.`, expr.target.name);
+                        throw new TypeCheckError(`Class '${objType.name}' has no mutable field '${prop}'.`, expr.target.name);
                     }
                     if (field.isConst) {
-                        throw new TypeError(`Cannot reassign constant field '${prop}'.`, expr.token);
+                        throw new TypeCheckError(`Cannot reassign constant field '${prop}'.`, expr.token);
                     }
                     const valueType = this.checkExpr(expr.value, field.type);
                     if (!isAssignable(valueType, field.type, this.isSubclass)) {
-                        throw new TypeError(
+                        throw new TypeCheckError(
                             `Cannot assign '${typeToString(valueType)}' to '${typeToString(field.type)}'.`,
                             expr.token
                         );
                     }
                     return valueType;
                 }
-                throw new TypeError(`Assignment to '${expr.target.kind}' is not implemented yet.`, expr.token);
+                throw new TypeCheckError(`Assignment to '${expr.target.kind}' is not implemented yet.`, expr.token);
             }
 
             case "Binary": {
@@ -1109,7 +1126,7 @@ export class TypeChecker {
                         if (isInteger(operand)) return operand;
                         break;
                 }
-                throw new TypeError(
+                throw new TypeCheckError(
                     `Unary operator '${expr.operator.lexeme}' cannot be applied to '${typeToString(operand)}'.`,
                     expr.operator
                 );
@@ -1120,7 +1137,7 @@ export class TypeChecker {
                 if (expr.operator.type === TokenType.BANG && isInteger(operand)) {
                     return operand;
                 }
-                throw new TypeError(
+                throw new TypeCheckError(
                     `Postfix operator '${expr.operator.lexeme}' cannot be applied to '${typeToString(operand)}'.`,
                     expr.operator
                 );
@@ -1132,14 +1149,14 @@ export class TypeChecker {
 
                 if (objType.kind === "List" || objType.kind === "Deque") {
                     if (idxTypes.length !== 1 || !isInteger(idxTypes[0])) {
-                        throw new TypeError(`${objType.kind} indexing requires a single integer index.`, expr.token);
+                        throw new TypeCheckError(`${objType.kind} indexing requires a single integer index.`, expr.token);
                     }
                     return objType.element;
                 }
 
                 if (objType.kind === "Map") {
                     if (idxTypes.length !== 1 || !isAssignable(idxTypes[0], objType.key, this.isSubclass)) {
-                        throw new TypeError(
+                        throw new TypeCheckError(
                             `Map key must be assignable to '${typeToString(objType.key)}'.`,
                             expr.token
                         );
@@ -1149,14 +1166,14 @@ export class TypeChecker {
 
                 if (objType.kind === "Primitive" && objType.name === "String") {
                     if (idxTypes.length !== 1 || !isInteger(idxTypes[0])) {
-                        throw new TypeError("String indexing requires a single integer index.", expr.token);
+                        throw new TypeCheckError("String indexing requires a single integer index.", expr.token);
                     }
                     return Types.String;
                 }
 
                 if (objType.kind === "Vector") {
                     if (idxTypes.length !== 1 || !isInteger(idxTypes[0])) {
-                        throw new TypeError("Vector indexing requires a single integer index.", expr.token);
+                        throw new TypeCheckError("Vector indexing requires a single integer index.", expr.token);
                     }
                     return objType.element;
                 }
@@ -1168,19 +1185,19 @@ export class TypeChecker {
                     if (idxTypes.length === 2 && isInteger(idxTypes[0]) && isInteger(idxTypes[1])) {
                         return objType.element;
                     }
-                    throw new TypeError("Matrix indexing requires 1 or 2 integer indexes.", expr.token);
+                    throw new TypeCheckError("Matrix indexing requires 1 or 2 integer indexes.", expr.token);
                 }
 
-                throw new TypeError(`Cannot index into type '${typeToString(objType)}'.`, expr.token);
+                throw new TypeCheckError(`Cannot index into type '${typeToString(objType)}'.`, expr.token);
             }
 
             case "Slicing": {
                 const objType = this.checkExpr(expr.object);
                 if (expr.start && !isInteger(this.checkExpr(expr.start))) {
-                    throw new TypeError("Slice start index must be an integer.", expr.token);
+                    throw new TypeCheckError("Slice start index must be an integer.", expr.token);
                 }
                 if (expr.end && !isInteger(this.checkExpr(expr.end))) {
-                    throw new TypeError("Slice end index must be an integer.", expr.token);
+                    throw new TypeCheckError("Slice end index must be an integer.", expr.token);
                 }
 
                 if (
@@ -1191,7 +1208,7 @@ export class TypeChecker {
                     return objType;
                 }
 
-                throw new TypeError(`Cannot slice type '${typeToString(objType)}'.`, expr.token);
+                throw new TypeCheckError(`Cannot slice type '${typeToString(objType)}'.`, expr.token);
             }
 
             case "Block": {
@@ -1205,11 +1222,16 @@ export class TypeChecker {
                 }
 
                 if (expr.unreachable && expr.unreachable.length > 0) {
-                    throw new TypeError("Unreachable code detected in block.", expr.token);
+                    throw new TypeCheckError("Unreachable code detected in block.", expr.token);
                 }
 
                 const prevScope = this.scope;
                 this.scope = new Scope(prevScope);
+                for (const stmt of expr.statements) {
+                    if (stmt.kind === "FuncDecl") {
+                        this.hoistFuncSignature(stmt);
+                    }
+                }
                 try {
                     for (const stmt of expr.statements) {
                         this.checkStmt(stmt);
@@ -1233,7 +1255,7 @@ export class TypeChecker {
             case "If": {
                 const condType = this.checkExpr(expr.condition, Types.Boolean);
                 if (!isAssignable(condType, Types.Boolean, this.isSubclass)) {
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         `Condition of 'if' must be Boolean, got '${typeToString(condType)}'.`,
                         expr.token
                     );
@@ -1245,7 +1267,7 @@ export class TypeChecker {
                 const failType = this.checkExpr(expr.fail, expected ?? successType);
                 const merged = commonType(successType, failType, this.isSubclass);
                 if (!merged) {
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         `Incompatible 'if' branch types: '${typeToString(successType)}' vs '${typeToString(failType)}'.`,
                         expr.token
                     );
@@ -1256,7 +1278,7 @@ export class TypeChecker {
             case "While": {
                 const condType = this.checkExpr(expr.condition, Types.Boolean);
                 if (!isAssignable(condType, Types.Boolean, this.isSubclass)) {
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         `Condition of 'while' must be Boolean, got '${typeToString(condType)}'.`,
                         expr.token
                     );
@@ -1318,7 +1340,7 @@ export class TypeChecker {
 
                         const patType = this.checkExpr(pat, subjectType);
                         if (!isAssignable(patType, subjectType, this.isSubclass)) {
-                            throw new TypeError(
+                            throw new TypeCheckError(
                                 `Pattern of type '${typeToString(patType)}' cannot match value of type '${typeToString(subjectType)}'.`,
                                 expr.token
                             );
@@ -1331,7 +1353,7 @@ export class TypeChecker {
                     } else {
                         const merged = commonType(resultType, armType, this.isSubclass);
                         if (!merged) {
-                            throw new TypeError(
+                            throw new TypeCheckError(
                                 `Incompatible 'match' arm types: '${typeToString(resultType)}' and '${typeToString(armType)}'.`,
                                 expr.token
                             );
@@ -1350,7 +1372,7 @@ export class TypeChecker {
                     ) {
                         return Types.Void;
                     }
-                    throw new TypeError(
+                    throw new TypeCheckError(
                         "Non-exhaustive 'match' expression producing a value; add a wildcard '_' arm.",
                         expr.token
                     );
@@ -1360,7 +1382,7 @@ export class TypeChecker {
             }
 
             case "Wildcard": {
-                throw new TypeError(
+                throw new TypeCheckError(
                     "Wildcard '_' can only be used in 'match' patterns or 'for' loop bindings.",
                     expr.token
                 );
@@ -1368,7 +1390,7 @@ export class TypeChecker {
 
             default: {
                 const _exhaustive: never = expr;
-                throw new TypeError(`Unhandled expression kind: ${(_exhaustive as Expr).kind}`);
+                throw new TypeCheckError(`Unhandled expression kind: ${(_exhaustive as Expr).kind}`);
             }
         }
     }
@@ -1401,38 +1423,38 @@ export class TypeChecker {
                     } else if (params.length === 1) {
                         const elem = this.resolveTypeNode(params[0]);
                         if (!isNumeric(elem)) {
-                            throw new TypeError(
+                            throw new TypeCheckError(
                                 `${kind} element type must be numeric, got '${typeToString(elem)}'.`,
                                 node.name
                             );
                         }
                         base = { kind, element: elem };
                     } else {
-                        throw new TypeError(`${kind} takes at most 1 type parameter.`, node.name);
+                        throw new TypeCheckError(`${kind} takes at most 1 type parameter.`, node.name);
                     }
                     break;
                 }
 
                 case TokenType.TYPE_LIST:
-                    if (params.length !== 1) throw new TypeError("List requires 1 type parameter.", node.name);
+                    if (params.length !== 1) throw new TypeCheckError("List requires 1 type parameter.", node.name);
                     base = { kind: "List", element: this.resolveTypeNode(params[0]) };
                     break;
 
                 case TokenType.TYPE_SET:
-                    if (params.length !== 1) throw new TypeError("Set requires 1 type parameter.", node.name);
+                    if (params.length !== 1) throw new TypeCheckError("Set requires 1 type parameter.", node.name);
                     base = { kind: "Set", element: this.resolveTypeNode(params[0]) };
                     break;
 
                 case TokenType.TYPE_DEQUE:
-                    if (params.length !== 1) throw new TypeError("Deque requires 1 type parameter.", node.name);
+                    if (params.length !== 1) throw new TypeCheckError("Deque requires 1 type parameter.", node.name);
                     base = { kind: "Deque", element: this.resolveTypeNode(params[0]) };
                     break;
 
                 case TokenType.TYPE_HEAP: {
-                    if (params.length !== 1) throw new TypeError("Heap requires 1 type parameter.", node.name);
+                    if (params.length !== 1) throw new TypeCheckError("Heap requires 1 type parameter.", node.name);
                     const elem = this.resolveTypeNode(params[0]);
                     if (!isOrdered(elem)) {
-                        throw new TypeError(
+                        throw new TypeCheckError(
                             `Heap element type must be orderable, got '${typeToString(elem)}'.`,
                             node.name
                         );
@@ -1442,7 +1464,7 @@ export class TypeChecker {
                 }
 
                 case TokenType.TYPE_MAP:
-                    if (params.length !== 2) throw new TypeError("Map requires 2 type parameters.", node.name);
+                    if (params.length !== 2) throw new TypeCheckError("Map requires 2 type parameters.", node.name);
                     base = {
                         kind: "Map",
                         key: this.resolveTypeNode(params[0]),
@@ -1451,12 +1473,12 @@ export class TypeChecker {
                     break;
 
                 case TokenType.IDENT:
-                    if (!this.classes.has(node.name.lexeme)) throw new TypeError(`Unknown type '${node.name.lexeme}'.`, node.name);
+                    if (!this.classes.has(node.name.lexeme)) throw new TypeCheckError(`Unknown type '${node.name.lexeme}'.`, node.name);
                     base = { kind: "Class", name: node.name.lexeme };
                     break;
 
                 default:
-                    throw new TypeError(`Unknown type '${node.name.lexeme}'.`, node.name);
+                    throw new TypeCheckError(`Unknown type '${node.name.lexeme}'.`, node.name);
             }
         }
 
@@ -1469,7 +1491,7 @@ export class TypeChecker {
         }
 
         if (loop.hasBareBreak) {
-            throw new TypeError(
+            throw new TypeCheckError(
                 "Cannot mix bare 'break;' and 'break <value>;' in the same loop.",
                 token
             );
@@ -1479,7 +1501,7 @@ export class TypeChecker {
         for (let i = 1; i < loop.breakTypes.length; i++) {
             const next = commonType(merged, loop.breakTypes[i], this.isSubclass);
             if (!next) {
-                throw new TypeError(
+                throw new TypeCheckError(
                     `Incompatible 'break' value types in loop: '${typeToString(merged)}' and '${typeToString(loop.breakTypes[i])}'.`,
                     token
                 );
@@ -1507,7 +1529,7 @@ export class TypeChecker {
                 break;
         }
 
-        throw new TypeError(
+        throw new TypeCheckError(
             `Type '${typeToString(iterable)}' is not iterable in a 'for' loop.`,
             token
         );

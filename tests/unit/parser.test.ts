@@ -617,3 +617,116 @@ describe("Parser - Syntax Error Detection", () => {
     expect(() => parseExpr("")).toThrow(/Unexpected token/);
   });
 });
+
+describe("Parser - Precedence, Control-Flow & Constructor Edge Cases", () => {
+  it("binds IMPLICIT_MUL tighter than unary and division (-2x, 2 ** -3x, 1 / 2π)", () => {
+    expect(parseExpr("-2x")).toMatchObject({
+      kind: "Unary",
+      operator: { lexeme: "-" },
+      operand: {
+        kind: "Binary",
+        operator: { lexeme: "*" },
+        left: { kind: "IntLit", value: 2n },
+        right: { kind: "Identifier", name: "x" },
+      },
+    });
+
+    expect(parseExpr("2 ** -3x")).toMatchObject({
+      kind: "Binary",
+      operator: { lexeme: "**" },
+      left: { kind: "IntLit", value: 2n },
+      right: {
+        kind: "Unary",
+        operator: { lexeme: "-" },
+        operand: { kind: "Binary", operator: { lexeme: "*" } },
+      },
+    });
+
+    expect(parseExpr("1 / 2π")).toMatchObject({
+      kind: "Binary",
+      operator: { lexeme: "/" },
+      left: { kind: "IntLit", value: 1n },
+      right: {
+        kind: "Binary",
+        operator: { lexeme: "*" },
+        left: { kind: "IntLit", value: 2n },
+        right: { kind: "Identifier", name: "π" },
+      },
+    });
+  });
+
+  it("parses '=>' one-liner if/else/while/for, block-started while conditions, and ternary assignments", () => {
+    expect(parseExpr("if flag => -1 else => 1")).toMatchObject({
+      kind: "If",
+      success: { kind: "Unary", operator: { lexeme: "-" } },
+      fail: { kind: "IntLit", value: 1n },
+    });
+
+    expect(parseExpr("while i > 0 => i = i - 1")).toMatchObject({
+      kind: "While",
+      block: { kind: "Assign" },
+    });
+
+    expect(parseExpr("for x in xs => x * 2")).toMatchObject({
+      kind: "For",
+      block: { kind: "Binary", operator: { lexeme: "*" } },
+    });
+
+    expect(parseExpr("while { let a = 1; a > 0 } && running { break; }")).toMatchObject({
+      kind: "While",
+      condition: { kind: "Binary", operator: { lexeme: "&&" }, left: { kind: "Block" } },
+    });
+
+    expect(parseExpr("cond ? a = 1 : b = 2")).toMatchObject({
+      kind: "If",
+      success: { kind: "Assign", target: { name: "a" } },
+      fail: { kind: "Assign", target: { name: "b" } },
+    });
+  });
+
+  it("parses signed match patterns, trailing commas, collection constructors, and generic Vector/Matrix types", () => {
+    expect(parseExpr("match x { -1 | +1 => true, _ => false, }")).toMatchObject({
+      kind: "Match",
+      arms: [
+        {
+          patterns: [
+            { kind: "Unary", operator: { lexeme: "-" }, operand: { value: 1n } },
+            { kind: "Unary", operator: { lexeme: "+" }, operand: { value: 1n } },
+          ],
+        },
+        { patterns: [{ kind: "Wildcard" }] },
+      ],
+    });
+
+    expect(parseExpr("Deque([1, 2])")).toMatchObject({
+      kind: "FunctionCall",
+      object: { kind: "Identifier", name: "Deque" },
+      args: [{ kind: "ListLit" }],
+    });
+    expect(() => parseExpr("Set")).toThrow(/Expected '\(' after collection constructor/);
+
+    const stmts = parseProgram(`
+      let v: Vector<Complex> = <1i>;
+      let m: Matrix<Float> = <1.0; 2.0>;
+      func pi: Float => 3.14;
+      func empty() {}
+    `);
+    expect(stmts[0]).toMatchObject({
+      typeAnnotation: { name: { lexeme: "Vector" }, typeParams: [{ name: { lexeme: "Complex" } }] },
+    });
+    expect(stmts[2]).toMatchObject({ kind: "FuncDecl", hasParens: false });
+    expect(stmts[3]).toMatchObject({ kind: "FuncDecl", hasParens: true });
+  });
+
+  it("parses blocks starting with statement keywords and rejects malformed control flow / class bodies", () => {
+    expect(parseExpr("{ func f() => 1; f() }")).toMatchObject({
+      kind: "Block",
+      statements: [{ kind: "FuncDecl" }],
+      returnExpr: { kind: "FunctionCall" },
+    });
+    expect(() => parseExpr("if a b")).toThrow(/Expected '\{' or '=>'/);
+    expect(() => parseExpr("if a => 1 else 2")).toThrow(/Expected '\{', 'if', or '=>'/);
+    expect(() => parseExpr("match x { 1 => 2 3 => 4 }")).toThrow(/Expected '\}'/);
+    expect(() => parseProgram("class A { 123; }")).toThrow(/Expected 'let', 'const', or 'func'/);
+  });
+});

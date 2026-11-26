@@ -338,3 +338,120 @@ describe("TypeChecker - Base", () => {
         expect(() => check("let d = Deque(42);")).toThrow(/not iterable/);
     });
 });
+
+describe("TypeChecker - Exhaustive Edge Cases", () => {
+    it("enforces numeric promotion, BigInt precision guards, bitwise ops, factorial, and string ops", () => {
+        expect(() =>
+            check(`
+        let bi: BigInt = 10.toBigInt;
+        let bigPlusFloat: Double = bi + 1.5;   // BigInt + Float -> Double (no precision loss)
+        let bigPlusInt: BigInt = bi + 5;
+        let intDiv: Double = 5 / 2;
+        let bitRes: Int = (~1 & 3 | 4 ^ 8) << 1 >> 1;
+        let fact: Int = 5!;
+        let factBig: BigInt = bi!;
+        let approx: Boolean = (3.14 ~= 3.141) && (<1, 2> ~= <1.0, 2.0>);
+        let matPow: Matrix<Int> = <1, 2; 3, 4> ** 2;
+        let matDiv: Matrix<Double> = <1, 2; 3, 4> / 2;
+        let rowMul: Vector<Int> = <1, 2> * <1, 2; 3, 4>;
+        let setDiff: Set<Int> = {1, 2, 3} \\ {2};
+        let strOps: Boolean = ("a" + "b" < "c") && ("a" in "abc") && ("hi".length == 2);
+        let parts: List<String> = "a,b".trim.upper.split(",");
+        let ch: String = "hello"[0];
+        let sub: String = "hello"[1:4];
+      `)
+        ).not.toThrow();
+
+        expect(() => check("let b: BigInt = 1.toBigInt; let f: Float = b;")).toThrow(/Cannot assign/);
+        expect(() => check("let x = 1i < 2i;")).toThrow(/cannot be applied/);
+        expect(() => check("let x = 1.5 & 2;")).toThrow(/cannot be applied/);
+        expect(() => check("let x = 3.5!;")).toThrow(/cannot be applied/);
+        expect(() => check("let x = ~1.5;")).toThrow(/cannot be applied/);
+        expect(() => check("let x = <1, 2; 3, 4> ** 0.5;")).toThrow(/cannot be applied/);
+        expect(() => check("let x = {1, 2} union {1.5};")).toThrow(/cannot be applied/);
+    });
+
+    it("checks first-class functions, nested block functions, shadowing, and scoping", () => {
+        expect(() =>
+            check(`
+        func add(a: Int, b: Int): Int => a + b;
+        func apply(f: (Int, Int) -> Int, x: Int, y: Int): Int => f(x, y);
+        let fnVar: (Int, Int) -> Int = add;
+        let r1: Int = apply(fnVar, 2, 3);
+
+        // Nested function inside a block & variable shadowing
+        let x = 1;
+        let r2: Int = {
+          let x = "shadowed";
+          func helper(n: Int): Int => n + x.length;
+          helper(10)
+        };
+        let stillInt: Int = x + 1;
+      `)
+        ).not.toThrow();
+
+        expect(() => check("let x = 1; x();")).toThrow(/Cannot call value of non-function type/);
+        expect(() => check("let a = 1; let a = 2;")).toThrow(/already declared/);
+        expect(() => check("func f(a: Int, a: Int): Int => a;")).toThrow(/Duplicate parameter/);
+        expect(() => check("for x in [1, 2] { } let y = x;")).toThrow(/Undefined identifier/);
+        expect(() => check("func f() { class Local {} }")).toThrow(/only allowed at the top level/);
+    });
+
+    it("checks multi-level inheritance, untyped class fields, optional edge cases, and divergence", () => {
+        expect(() =>
+            check(`
+        class A { let base = 10; }
+        class B inherits A { let mid = "ok"; }
+        class C inherits B {
+          func read(): Int {
+            this.base = 20;
+            return this.base + this.mid.length;
+          }
+        }
+        let c = C();
+        let asA: A = c;
+        let listOfA: List<A> = [c, B(), A()];
+
+        // Optional contextual literals & branching
+        let ov: Vector<Int>? = <>;
+        let ol: List<Int>? = [];
+        let branchOpt: Int? = if true { 1 } else { None };
+        let isNull: Boolean = branchOpt == None && branchOpt.isNone;
+        let unwrapped: Int = branchOpt.unwrap();
+
+        // Divergence (Never) in if/match inside typed function
+        func guarded(x: Int): Int {
+          let v: Int = if x < 0 { return -1; } else { x };
+          match v {
+            0 => { return 0; },
+            _ => v * 2,
+          }
+        }
+
+        // Multiple break types merging into Float?
+        let loopVal: Float? = while true {
+          if true { break 1; } else { break 2.5; }
+        };
+      `)
+        ).not.toThrow();
+
+        expect(() => check("let x: Ghost = 1;")).toThrow(/Unknown type 'Ghost'/);
+        expect(() => check("class A { let x = None; }")).toThrow(/Cannot infer type of field/);
+    });
+
+    it("populates exprTypes side-table with contextual resolved types", () => {
+        const program = new Parser(tokenize("let m: Map<String, Int> = {};")).parseProgram();
+        const checker = new TypeChecker();
+        checker.checkProgram(program);
+
+        const decl = program[0];
+        expect(decl.kind).toBe("VarDecl");
+        if (decl.kind === "VarDecl") {
+            expect(checker.exprTypes.get(decl.initializer)).toEqual({
+                kind: "Map",
+                key: { kind: "Primitive", name: "String" },
+                value: { kind: "Primitive", name: "Int" },
+            });
+        }
+    });
+});
