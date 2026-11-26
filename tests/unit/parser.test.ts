@@ -74,7 +74,7 @@ describe("Parser - Assignment Expressions", () => {
       },
     });
 
-    expect(parseProgram("let x = a = b = 3;")[0]).toMatchObject({
+    expect(parseProgram("let x = a = b = 3;").stmts[0]).toMatchObject({
       kind: "VarDecl",
       name: { lexeme: "x" },
       initializer: {
@@ -382,7 +382,7 @@ describe("Parser - Control Flow & Block Expressions", () => {
     });
     if (afterReturn.kind === "Block") expect(afterReturn.returnExpr).toBeUndefined();
 
-    expect(() => parseProgram("1 2")).toThrow(/Expected ';'/);
+    expect(parseProgram("1 2").diagnostics[0].message).toMatch(/Expected ';'/);
   });
 
   it("parses if, else if, else, while, for, and match expressions", () => {
@@ -445,7 +445,7 @@ describe("Parser - Control Flow & Block Expressions", () => {
 
 describe("Parser - Declarations & Statements", () => {
   it("parses import declarations", () => {
-    expect(parseProgram('import "linear_algebra";')[0]).toMatchObject({
+    expect(parseProgram('import "linear_algebra";').stmts[0]).toMatchObject({
       kind: "ImportDecl",
       path: { lexeme: '"linear_algebra"' },
     });
@@ -457,7 +457,7 @@ describe("Parser - Declarations & Statements", () => {
       const b: Int? = None;
       let c: Map<String, List<List<Int>>> = {"grid": [[1, 2]]};
       let fnType: (Int, Float) -> Boolean? = check;
-    `);
+    `).stmts;
 
     expect(stmts[0]).toMatchObject({ kind: "VarDecl", isConst: false, name: { lexeme: "a" } });
     expect(stmts[1]).toMatchObject({
@@ -505,7 +505,7 @@ describe("Parser - Declarations & Statements", () => {
       func square(x) => x * x;
       func pi: Float => 3.14159;
       func empty() {}
-    `);
+    `).stmts;
 
     expect(stmts[0]).toMatchObject({
       kind: "FuncDecl",
@@ -554,7 +554,7 @@ describe("Parser - Declarations & Statements", () => {
         }
       }
       let after = 1;
-    `);
+    `).stmts;
 
     expect(stmts[0]).toMatchObject({
       kind: "ClassDecl",
@@ -584,7 +584,7 @@ describe("Parser - Declarations & Statements", () => {
       break;
       break x + 1;
       continue;
-    `);
+    `).stmts;
 
     expect(stmts[0]).toMatchObject({ kind: "ReturnStmt" });
     expect(stmts[1]).toMatchObject({ kind: "ReturnStmt", returned: { kind: "IntLit", value: 42n } });
@@ -607,13 +607,13 @@ describe("Parser - Syntax Error Detection", () => {
     expect(() => parseExpr("(a) = 2")).toThrow(/Invalid assignment target/);
     expect(() => parseExpr("for 123 in list {}")).toThrow(/Expected identifier or '_'/);
     expect(() => parseExpr("match x { 1 2 }")).toThrow(/Expected '=>'/);
-    expect(() => parseProgram("let x: Map<Int> = 0;")).toThrow(/Expected ','/);
-    expect(() => parseProgram("let x = 5")).toThrow(/Expected ';'/);
-    expect(() => parseProgram("import 123;")).toThrow(/Expected string/);
-    expect(() => parseProgram("class Foo { let x = 1;")).toThrow(/Expected '}'/);
-    expect(() => parseProgram("func f(a: Int b: Int) {}")).toThrow(/Expected '\)'/);
-    expect(() => parseProgram("func f() => 1")).toThrow(/Expected ';'/);
-    expect(() => parseProgram("continue")).toThrow(/Expected ';'/);
+    expect(parseProgram("let x: Map<Int> = 0;").diagnostics[0].message).toMatch(/Expected ','/);
+    expect(parseProgram("let x = 5").diagnostics[0].message).toMatch(/Expected ';'/);
+    expect(parseProgram("import 123;").diagnostics[0].message).toMatch(/Expected string/);
+    expect(parseProgram("class Foo { let x = 1;").diagnostics[0].message).toMatch(/Expected '}'/);
+    expect(parseProgram("func f(a: Int b: Int) {}").diagnostics[0].message).toMatch(/Expected '\)'/);
+    expect(parseProgram("func f() => 1").diagnostics[0].message).toMatch(/Expected ';'/);
+    expect(parseProgram("continue").diagnostics[0].message).toMatch(/Expected ';'/);
     expect(() => parseExpr("")).toThrow(/Unexpected token/);
   });
 });
@@ -710,7 +710,7 @@ describe("Parser - Precedence, Control-Flow & Constructor Edge Cases", () => {
       let m: Matrix<Float> = <1.0; 2.0>;
       func pi: Float => 3.14;
       func empty() {}
-    `);
+    `).stmts;
     expect(stmts[0]).toMatchObject({
       typeAnnotation: { name: { lexeme: "Vector" }, typeParams: [{ name: { lexeme: "Complex" } }] },
     });
@@ -727,6 +727,6 @@ describe("Parser - Precedence, Control-Flow & Constructor Edge Cases", () => {
     expect(() => parseExpr("if a b")).toThrow(/Expected '\{' or '=>'/);
     expect(() => parseExpr("if a => 1 else 2")).toThrow(/Expected '\{', 'if', or '=>'/);
     expect(() => parseExpr("match x { 1 => 2 3 => 4 }")).toThrow(/Expected '\}'/);
-    expect(() => parseProgram("class A { 123; }")).toThrow(/Expected 'let', 'const', or 'func'/);
+    expect(parseProgram("class A { 123; }").diagnostics[0].message).toMatch(/Expected 'let', 'const', or 'func'/);
   });
 });

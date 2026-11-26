@@ -2,18 +2,18 @@ import { describe, it, expect } from "vitest";
 import { tokenize } from "../../src/core/lexer.js";
 import { Parser } from "../../src/core/parser.js";
 import { TypeChecker } from "../../src/core/typechecker.js";
+import { Diagnostic } from "../../src/core/diagnostics.js";
 
-function check(code: string): TypeChecker {
+function check(code: string): { checker: TypeChecker; diagnostics: readonly Diagnostic[] } {
     const program = new Parser(tokenize(code)).parseProgram();
     const checker = new TypeChecker();
-    checker.checkProgram(program);
-    return checker;
+    const diagnostics = checker.checkProgram(program.stmts);
+    return { checker, diagnostics };
 }
 
 describe("TypeChecker - Base", () => {
     it("checks variable declarations, inference, optionals, blocks, and contextual empty Map/Set", () => {
-        expect(() =>
-            check(`
+        expect(check(`
         let x = 10;
         const y: Int? = None;
         let m: Map<String, Int> = {};
@@ -23,20 +23,19 @@ describe("TypeChecker - Base", () => {
           let b: Int = x div 2;
           if a == 15 { a } else => 0
         };
-      `)
-        ).not.toThrow();
+      `).diagnostics).toEqual([]);
     });
 
     it("rejects type mismatches, const reassignment, undefined vars, and unreachable code", () => {
-        expect(() => check('let x: Int = "oops";')).toThrow(/Cannot assign 'String'/);
-        expect(() => check("const a = 1; a = 2;")).toThrow(/Cannot reassign constant/);
-        expect(() => check("let a = unknownVar;")).toThrow(/Undefined identifier/);
-        expect(() => check("let a = None;")).toThrow(/Cannot infer type/);
-        expect(() => check("let a = { 1 2 };")).toThrow(/Unreachable code/);
+        expect(check('let x: Int = "oops";').diagnostics[0].message).toMatch(/Cannot assign 'String'/);
+        expect(check("const a = 1; a = 2;").diagnostics[0].message).toMatch(/Cannot reassign constant/);
+        expect(check("let a = unknownVar;").diagnostics[0].message).toMatch(/Undefined identifier/);
+        expect(check("let a = None;").diagnostics[0].message).toMatch(/Cannot infer type/);
+        expect(check("let a = { 1 2 };").diagnostics[0].message).toMatch(/Unreachable code/);
     });
 
     it("infers typed vectors/matrices, promotes numerics, and enforces strict linear algebra", () => {
-        expect(() =>
+        expect(
             check(`
         let vi = <1, 2, 3>;                    // Vector<Int>
         let vf = <1, 2.5, 3>;                  // Vector<Float>
@@ -49,21 +48,20 @@ describe("TypeChecker - Base", () => {
         let cell: Int = m[0, 1];
         let row: Vector<Int> = m[0];
         let cp: Vector<Int> = vi cross <4, 5, 6>;
-      `)
-        ).not.toThrow();
+      `).diagnostics
+        ).toEqual([]);
 
         // Strict linear algebra rejections
-        expect(() => check("let x = <1, 2> + 1;")).toThrow(/cannot be applied/);
-        expect(() => check("let x = <1, 2; 3, 4> + 1;")).toThrow(/cannot be applied/);
-        expect(() => check("let x = 2 cross <1, 2, 3>;")).toThrow(/cannot be applied/);
-        expect(() => check("let x = 1 / <1, 2>;")).toThrow(/cannot be applied/);
-        expect(() => check('let x = <1, "a">;')).toThrow(/must be numeric/);
-        expect(() => check("let x: Vector<String> = <>;")).toThrow(/must be numeric/);
+        expect(check("let x = <1, 2> + 1;").diagnostics[0].message).toMatch(/cannot be applied/);
+        expect(check("let x = <1, 2; 3, 4> + 1;").diagnostics[0].message).toMatch(/cannot be applied/);
+        expect(check("let x = 2 cross <1, 2, 3>;").diagnostics[0].message).toMatch(/cannot be applied/);
+        expect(check("let x = 1 / <1, 2>;").diagnostics[0].message).toMatch(/cannot be applied/);
+        expect(check('let x = <1, "a">;').diagnostics[0].message).toMatch(/must be numeric/);
+        expect(check("let x: Vector<String> = <>;").diagnostics[0].message).toMatch(/must be numeric/);
     });
 
     it("checks lists, dynamic ranges, sets, maps, contextual empty literals, indexing & slicing", () => {
-        expect(() =>
-            check(`
+        expect(check(`
       let nums = [1, 2, 3];                        // List<Int>
       let mixed: List<Float> = [1, 2.5];           // Element widening
       let optList = [1, None];                     // List<Int?>
@@ -83,23 +81,22 @@ describe("TypeChecker - Base", () => {
       m["c"] = 3;
       let hasKey: Boolean = "a" in m;
       let hasElem: Boolean = 2 in s2;
-    `)
-        ).not.toThrow();
+    `).diagnostics
+        ).toEqual([]);
 
         // Rejections
-        expect(() => check("let a = [];")).toThrow(/Cannot infer element type/);
-        expect(() => check('let a = [1, "oops"];')).toThrow(/Incompatible List element types/);
-        expect(() => check("let a: List<Int> = [1]; let b: List<Float> = a;")).toThrow(/Cannot assign/);
-        expect(() => check('let r = ["a" to "z"];')).toThrow(/must be real numeric/);
-        expect(() => check("let r = [1i to 5i];")).toThrow(/must be real numeric/);
-        expect(() => check('let m = {"a": 1}; let x = m[0];')).toThrow(/Map key/);
-        expect(() => check('let s = "abc"; s[0] = "z";')).toThrow(/Cannot mutate a String/);
-        expect(() => check('let a = [1, 2]; let s = a["0":1];')).toThrow(/must be an integer/);
+        expect(check("let a = [];").diagnostics[0].message).toMatch(/Cannot infer element type/);
+        expect(check('let a = [1, "oops"];').diagnostics[0].message).toMatch(/Incompatible List element types/);
+        expect(check("let a: List<Int> = [1]; let b: List<Float> = a;").diagnostics[0].message).toMatch(/Cannot assign/);
+        expect(check('let r = ["a" to "z"];').diagnostics[0].message).toMatch(/must be real numeric/);
+        expect(check("let r = [1i to 5i];").diagnostics[0].message).toMatch(/must be real numeric/);
+        expect(check('let m = {"a": 1}; let x = m[0];').diagnostics[0].message).toMatch(/Map key/);
+        expect(check('let s = "abc"; s[0] = "z";').diagnostics[0].message).toMatch(/Cannot mutate a String/);
+        expect(check('let a = [1, 2]; let s = a["0":1];').diagnostics[0].message).toMatch(/must be an integer/);
     });
 
     it("checks while, for, break/continue, and match expressions", () => {
-        expect(() =>
-            check(`
+        expect(check(`
         let i = 0;
         while i < 5 {
             i = i + 1;
@@ -142,26 +139,25 @@ describe("TypeChecker - Base", () => {
         match i {
             0 => { sum = 0; },
         }
-    `)
-        ).not.toThrow();
+    `).diagnostics
+        ).toEqual([]);
 
         // Rejections
-        expect(() => check("while 1 { }")).toThrow(/must be Boolean/);
-        expect(() => check("for x in 42 { }")).toThrow(/not iterable/);
-        expect(() => check("for x in [1, 2] { x = 3; }")).toThrow(/Cannot reassign constant/);
-        expect(() => check("break;")).toThrow(/inside a loop/);
-        expect(() => check("continue;")).toThrow(/inside a loop/);
-        expect(() => check("return 1;")).toThrow(/inside a function/);
-        expect(() => check("for x in [1, 2] { if x == 1 { break; } else { break x; } }")).toThrow(/Cannot mix/);
-        expect(() => check('let x = match 1 { "a" => 1, _ => 2 };')).toThrow(/cannot match/);
-        expect(() => check("let x = match 1 { 0 => 1, 1 => 2 };")).toThrow(/Non-exhaustive/);
-        expect(() => check('let x = match 1 { 0 => 1, _ => "two" };')).toThrow(/Incompatible 'match' arm types/);
-        expect(() => check("let x = _;")).toThrow(/Wildcard '_'/);
+        expect(check("while 1 { }").diagnostics[0].message).toMatch(/must be Boolean/);
+        expect(check("for x in 42 { }").diagnostics[0].message).toMatch(/not iterable/);
+        expect(check("for x in [1, 2] { x = 3; }").diagnostics[0].message).toMatch(/Cannot reassign constant/);
+        expect(check("break;").diagnostics[0].message).toMatch(/inside a loop/);
+        expect(check("continue;").diagnostics[0].message).toMatch(/inside a loop/);
+        expect(check("return 1;").diagnostics[0].message).toMatch(/inside a function/);
+        expect(check("for x in [1, 2] { if x == 1 { break; } else { break x; } }").diagnostics[0].message).toMatch(/Cannot mix/);
+        expect(check('let x = match 1 { "a" => 1, _ => 2 };').diagnostics[0].message).toMatch(/cannot match/);
+        expect(check("let x = match 1 { 0 => 1, 1 => 2 };").diagnostics[0].message).toMatch(/Non-exhaustive/);
+        expect(check('let x = match 1 { 0 => 1, _ => "two" };').diagnostics[0].message).toMatch(/Incompatible 'match' arm types/);
+        expect(check("let x = _;").diagnostics[0].message).toMatch(/Wildcard '_'/);
     });
 
     it("supports two-pass hoisting, recursion, functions, classes, inheritance, and this", () => {
-        expect(() =>
-            check(`
+        expect(check(`
       // Mutual recursion (requires two-pass hoisting)
       func isEven(n: Int): Boolean => n == 0 ? true : isOdd(n - 1);
       func isOdd(n: Int): Boolean => n == 0 ? false : isEven(n - 1);
@@ -198,33 +194,35 @@ describe("TypeChecker - Base", () => {
       let n: Double = v.norm;      // Auto-invoked parameterless method
       let id: Int = v.getId();     // Inherited method
       v.x = 1.0;
-    `)
-        ).not.toThrow();
+    `).diagnostics
+        ).toEqual([]);
 
         // Rejections
-        expect(() => check("class A inherits B {} class B inherits A {}")).toThrow(/Circular inheritance/);
-        expect(() => check("class A inherits Missing {}")).toThrow(/not defined/);
-        expect(() => check("let x = this;")).toThrow(/inside a class method/);
-        expect(() => check("func bad(x: Int): Int { if x > 0 { return 1; } }")).toThrow(/body evaluates to 'Void'/);
-        expect(() => check("func f(x: Int): Int => x; let a = f(1, 2);")).toThrow(/Expected 1 argument/);
-        expect(() => check("class C { const k: Int = 1; } let c = C(); c.k = 2;")).toThrow(/constant field/);
-        expect(() => check("let x = f(1); func f(a: Int) => a;")).toThrow(/explicit return type/);
+        expect(check("class A inherits B {} class B inherits A {}").diagnostics[0].message).toMatch(/Circular inheritance/);
+        expect(check("class A inherits Missing {}").diagnostics[0].message).toMatch(/not defined/);
+        expect(check("let x = this;").diagnostics[0].message).toMatch(/inside a class method/);
+        expect(check("func bad(x: Int): Int { if x > 0 { return 1; } }").diagnostics[0].message).toMatch(/body evaluates to 'Void'/);
+        expect(check("func f(x: Int): Int => x; let a = f(1, 2);").diagnostics[0].message).toMatch(/Expected 1 argument/);
+        expect(check("class C { const k: Int = 1; } let c = C(); c.k = 2;").diagnostics[0].message).toMatch(/constant field/);
+        expect(check("let x = f(1); func f(a: Int) => a;").diagnostics[0].message).toMatch(/explicit return type/);
     });
 
-    function checkWithModules(code: string, modules: Record<string, string>): TypeChecker {
+    function checkWithModules(
+        code: string,
+        modules: Record<string, string>
+    ): { checker: TypeChecker; diagnostics: readonly Diagnostic[] } {
         const loader = (path: string) => {
             const src = modules[path];
             return src !== undefined ? new Parser(tokenize(src)).parseProgram() : undefined;
         };
         const program = new Parser(tokenize(code)).parseProgram();
         const checker = new TypeChecker({ moduleLoader: loader });
-        checker.checkProgram(program);
-        return checker;
+        const diagnostics = checker.checkProgram(program.stmts);
+        return { checker, diagnostics };
     }
 
     it("supports built-in module imports, user file imports, and built-in properties/methods", () => {
-        expect(() =>
-            check(`
+        expect(check(`
         import "math";
         import "linalg";
         import "io";
@@ -261,13 +259,12 @@ describe("TypeChecker - Base", () => {
         let vOpt: Int? = m.get("a");
         let ks: List<String> = m.keys;
         println("done");
-    `)
-        ).not.toThrow();
+    `).diagnostics
+        ).toEqual([]);
 
         // User module import + inheritance across files
-        expect(() =>
-            checkWithModules(
-                `
+        expect(checkWithModules(
+            `
         import "shapes";
         class Circle inherits Shape {
           let r: Double = 1.0;
@@ -276,31 +273,29 @@ describe("TypeChecker - Base", () => {
         let id: Int = c.getId();
         let d: Double = scale(2.0);
       `,
-                {
-                    shapes: `
+            {
+                shapes: `
           class Shape {
             let id: Int = 1;
             func getId(): Int { return this.id; }
           }
           func scale(x: Double): Double => x * 2.0;
         `,
-                }
-            )
-        ).not.toThrow();
+            }
+        ).diagnostics
+        ).toEqual([]);
 
         // Rejections
-        expect(() => check('import "nonexistent";')).toThrow(/Unknown module/);
-        expect(() =>
-            checkWithModules('import "a";', { a: 'import "b";', b: 'import "a";' })
-        ).toThrow(/Circular import/);
-        expect(() => check('func f() { import "math"; }')).toThrow(/only allowed at the top level/);
-        expect(() => check("let x = (3 + 4i).toInt;")).toThrow(/has no property or method 'toInt'/);
-        expect(() => check('let xs = [1, 2]; xs.push("bad");')).toThrow(/cannot assign 'String' to 'Int'/);
+        expect(check('import "nonexistent";').diagnostics[0].message).toMatch(/Unknown module/);
+        expect(checkWithModules('import "a";', { a: 'import "b";', b: 'import "a";' })
+            .diagnostics[0].message).toMatch(/Circular import/);
+        expect(check('func f() { import "math"; }').diagnostics[0].message).toMatch(/only allowed at the top level/);
+        expect(check("let x = (3 + 4i).toInt;").diagnostics[0].message).toMatch(/has no property or method 'toInt'/);
+        expect(check('let xs = [1, 2]; xs.push("bad");').diagnostics[0].message).toMatch(/cannot assign 'String' to 'Int'/);
     });
 
     it("checks Deque, Heap, and collection constructors", () => {
-        expect(() =>
-            check(`
+        expect(check(`
       let d1: Deque<Int> = Deque();
       let d2 = Deque([1, 2, 3]);
       let d3: Deque<Float> = Deque([1, 2]);
@@ -325,24 +320,23 @@ describe("TypeChecker - Base", () => {
       let s1: Set<String> = Set();
       let s2 = Set([1, 2, 2]);
       let m1: Map<String, Int> = Map();
-    `)
-        ).not.toThrow();
+    `).diagnostics
+        ).toEqual([]);
 
         // Rejections
-        expect(() => check("let d = Deque();")).toThrow(/Cannot infer element type/);
-        expect(() => check("let h = Heap();")).toThrow(/Cannot infer element type/);
-        expect(() => check("let m = Map();")).toThrow(/Cannot infer types/);
-        expect(() => check("let h: Heap<Complex> = Heap();")).toThrow(/must be orderable/);
-        expect(() => check("let h = Heap([1i, 2i]);")).toThrow(/must be orderable/);
-        expect(() => check("let h = Heap([1, 2]); let x = h[0];")).toThrow(/Cannot index/);
-        expect(() => check("let d = Deque(42);")).toThrow(/not iterable/);
+        expect(check("let d = Deque();").diagnostics[0].message).toMatch(/Cannot infer element type/);
+        expect(check("let h = Heap();").diagnostics[0].message).toMatch(/Cannot infer element type/);
+        expect(check("let m = Map();").diagnostics[0].message).toMatch(/Cannot infer types/);
+        expect(check("let h: Heap<Complex> = Heap();").diagnostics[0].message).toMatch(/must be orderable/);
+        expect(check("let h = Heap([1i, 2i]);").diagnostics[0].message).toMatch(/must be orderable/);
+        expect(check("let h = Heap([1, 2]); let x = h[0];").diagnostics[0].message).toMatch(/Cannot index/);
+        expect(check("let d = Deque(42);").diagnostics[0].message).toMatch(/not iterable/);
     });
 });
 
 describe("TypeChecker - Exhaustive Edge Cases", () => {
     it("enforces numeric promotion, BigInt precision guards, bitwise ops, factorial, and string ops", () => {
-        expect(() =>
-            check(`
+        expect(check(`
         let bi: BigInt = 10.toBigInt;
         let bigPlusFloat: Double = bi + 1.5;   // BigInt + Float -> Double (no precision loss)
         let bigPlusInt: BigInt = bi + 5;
@@ -359,21 +353,20 @@ describe("TypeChecker - Exhaustive Edge Cases", () => {
         let parts: List<String> = "a,b".trim.upper.split(",");
         let ch: String = "hello"[0];
         let sub: String = "hello"[1:4];
-      `)
-        ).not.toThrow();
+      `).diagnostics
+        ).toEqual([]);
 
-        expect(() => check("let b: BigInt = 1.toBigInt; let f: Float = b;")).toThrow(/Cannot assign/);
-        expect(() => check("let x = 1i < 2i;")).toThrow(/cannot be applied/);
-        expect(() => check("let x = 1.5 & 2;")).toThrow(/cannot be applied/);
-        expect(() => check("let x = 3.5!;")).toThrow(/cannot be applied/);
-        expect(() => check("let x = ~1.5;")).toThrow(/cannot be applied/);
-        expect(() => check("let x = <1, 2; 3, 4> ** 0.5;")).toThrow(/cannot be applied/);
-        expect(() => check("let x = {1, 2} union {1.5};")).toThrow(/cannot be applied/);
+        expect(check("let b: BigInt = 1.toBigInt; let f: Float = b;").diagnostics[0].message).toMatch(/Cannot assign/);
+        expect(check("let x = 1i < 2i;").diagnostics[0].message).toMatch(/cannot be applied/);
+        expect(check("let x = 1.5 & 2;").diagnostics[0].message).toMatch(/cannot be applied/);
+        expect(check("let x = 3.5!;").diagnostics[0].message).toMatch(/cannot be applied/);
+        expect(check("let x = ~1.5;").diagnostics[0].message).toMatch(/cannot be applied/);
+        expect(check("let x = <1, 2; 3, 4> ** 0.5;").diagnostics[0].message).toMatch(/cannot be applied/);
+        expect(check("let x = {1, 2} union {1.5};").diagnostics[0].message).toMatch(/cannot be applied/);
     });
 
     it("checks first-class functions, nested block functions, shadowing, and scoping", () => {
-        expect(() =>
-            check(`
+        expect(check(`
         func add(a: Int, b: Int): Int => a + b;
         func apply(f: (Int, Int) -> Int, x: Int, y: Int): Int => f(x, y);
         let fnVar: (Int, Int) -> Int = add;
@@ -387,19 +380,18 @@ describe("TypeChecker - Exhaustive Edge Cases", () => {
           helper(10)
         };
         let stillInt: Int = x + 1;
-      `)
-        ).not.toThrow();
+      `).diagnostics
+        ).toEqual([]);
 
-        expect(() => check("let x = 1; x();")).toThrow(/Cannot call value of non-function type/);
-        expect(() => check("let a = 1; let a = 2;")).toThrow(/already declared/);
-        expect(() => check("func f(a: Int, a: Int): Int => a;")).toThrow(/Duplicate parameter/);
-        expect(() => check("for x in [1, 2] { } let y = x;")).toThrow(/Undefined identifier/);
-        expect(() => check("func f() { class Local {} }")).toThrow(/only allowed at the top level/);
+        expect(check("let x = 1; x();").diagnostics[0].message).toMatch(/Cannot call value of non-function type/);
+        expect(check("let a = 1; let a = 2;").diagnostics[0].message).toMatch(/already declared/);
+        expect(check("func f(a: Int, a: Int): Int => a;").diagnostics[0].message).toMatch(/Duplicate parameter/);
+        expect(check("for x in [1, 2] { } let y = x;").diagnostics[0].message).toMatch(/Undefined identifier/);
+        expect(check("func f() { class Local {} }").diagnostics[0].message).toMatch(/only allowed at the top level/);
     });
 
     it("checks multi-level inheritance, untyped class fields, optional edge cases, and divergence", () => {
-        expect(() =>
-            check(`
+        expect(check(`
         class A { let base = 10; }
         class B inherits A { let mid = "ok"; }
         class C inherits B {
@@ -432,19 +424,19 @@ describe("TypeChecker - Exhaustive Edge Cases", () => {
         let loopVal: Float? = while true {
           if true { break 1; } else { break 2.5; }
         };
-      `)
-        ).not.toThrow();
+      `).diagnostics
+        ).toEqual([]);
 
-        expect(() => check("let x: Ghost = 1;")).toThrow(/Unknown type 'Ghost'/);
-        expect(() => check("class A { let x = None; }")).toThrow(/Cannot infer type of field/);
+        expect(check("let x: Ghost = 1;").diagnostics[0].message).toMatch(/Unknown type 'Ghost'/);
+        expect(check("class A { let x = None; }").diagnostics[0].message).toMatch(/Cannot infer type of field/);
     });
 
     it("populates exprTypes side-table with contextual resolved types", () => {
         const program = new Parser(tokenize("let m: Map<String, Int> = {};")).parseProgram();
         const checker = new TypeChecker();
-        checker.checkProgram(program);
+        checker.checkProgram(program.stmts);
 
-        const decl = program[0];
+        const decl = program.stmts[0];
         expect(decl.kind).toBe("VarDecl");
         if (decl.kind === "VarDecl") {
             expect(checker.exprTypes.get(decl.initializer)).toEqual({

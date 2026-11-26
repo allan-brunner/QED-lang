@@ -11,11 +11,12 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "build:cli": "esbuild src/cli/index.ts --bundle --format=esm --platform=node --banner:js=\"#!/usr/bin/env node\" --outfile=dist/cli.js",
-    "build:web": "esbuild src/web/index.ts --bundle --format=esm --platform=browser --outfile=dist/qed.browser.js",
-    "build": "npm run typecheck && npm run build:cli && npm run build:web"
+    "build:ide": "tsc -p tsconfig.ide.json",
+    "watch:ide": "tsc -p tsconfig.ide.json --watch",
+    "build": "npm run typecheck && npm run build:cli && npm run build:ide"
   },
   "dependencies": {
-    "@types/node": "^26.6.6",
+    "@types/node": "^26.6.11",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
   },
@@ -23,6 +24,6 @@
     "esbuild@0.28.2": true
   },
   "devDependencies": {
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.2"
   }
 }

@@ -1,5 +1,6 @@
 import { Token, TokenType } from "./token.js";
 import { Expr, FuncParam, Stmt, TypeNode } from "./ast.js";
+import { Diagnostic, ParseError } from "./diagnostics.js";
 
 enum Precedence {
   LOGIC_OR = 1,
@@ -69,7 +70,7 @@ export class Parser {
   private consume(type: TokenType, message: string): Token {
     if (this.check(type)) return this.advance();
     const tok = this.peek();
-    throw new Error(`Parse error at ${tok.line}:${tok.column} ('${tok.lexeme}'): ${message}`);
+    throw new ParseError(message, tok);
   }
 
   private isAdjacent(first: Token, second: Token): boolean {
@@ -96,22 +97,46 @@ export class Parser {
     return exprs;
   }
 
-  public parseProgram(): Stmt[] {
+  public parseProgram(): { stmts: Stmt[]; diagnostics: Diagnostic[] } {
     const stmts: Stmt[] = [];
+    const diagnostics: Diagnostic[] = [];
+
     while (!this.isAtEnd()) {
-      const stmt = this.parseStatement();
-      if (
-        stmt.kind === "ExprStmt" &&
-        !stmt.hasSemicolon &&
-        !this.endsWithBlock(stmt.expr) &&
-        !this.isAtEnd()
-      ) {
-        const tok = this.peek();
-        throw new Error(`Parse error at ${tok.line}:${tok.column}: Expected ';' after expression.`);
+      const before = this.current;
+      try {
+        const stmt = this.parseStatement();
+        if (
+          stmt.kind === "ExprStmt" &&
+          !stmt.hasSemicolon &&
+          !this.endsWithBlock(stmt.expr) &&
+          !this.isAtEnd()
+        ) {
+          const tok = this.peek();
+          throw new ParseError("Expected ';' after expression.", tok);
+        }
+        stmts.push(stmt);
+      } catch (err) {
+        if (err instanceof ParseError) {
+          diagnostics.push(err.toDiagnostic());
+        } else {
+          throw err;
+        }
+        this.synchronize(before);
       }
-      stmts.push(stmt);
     }
-    return stmts;
+    return { stmts, diagnostics };
+  }
+
+  private synchronize(startPos: number): void {
+    if (this.current === startPos && !this.isAtEnd()) {
+      this.advance();
+    }
+    while (!this.isAtEnd()) {
+      if (this.previous().type === TokenType.SEMICOLON) return;
+      if (this.previous().type === TokenType.RIGHT_BRACE) return;
+      if (this.isStatementStart()) return;
+      this.advance();
+    }
   }
 
   private parseStatement(): Stmt {
@@ -191,7 +216,7 @@ export class Parser {
         members.push(this.parseMemberDecl());
       } else {
         const tok = this.peek();
-        throw new Error(`Parse error at ${tok.line}:${tok.column}: Expected 'let', 'const', or 'func' in class body.`);
+        throw new ParseError(`Expected 'let', 'const', or 'func' in class body.`, tok);
       }
     }
     this.consume(TokenType.RIGHT_BRACE, "Expected '}' after class body.");
@@ -316,7 +341,7 @@ export class Parser {
     }
 
     const tok = this.peek();
-    throw new Error(`Parse error at ${tok.line}:${tok.column}: Expected a type, got '${tok.lexeme}'.`);
+    throw new ParseError(`Expected a type, got '${tok.lexeme}'.`, tok);
   }
 
   private isStatementStart(): boolean {
@@ -437,9 +462,7 @@ export class Parser {
         return { kind: "Assign", target: expr, value, token };
       }
 
-      throw new Error(
-        `Parse error at ${token.line}:${token.column}: Invalid assignment target.`
-      );
+      throw new ParseError(`Invalid assignment target.`, token);
     }
 
     return expr;
@@ -714,9 +737,7 @@ export class Parser {
           if (raw[i + 1] === "\n") i++;
           break;
         default:
-          throw new Error(
-            `Parse error at ${token.line}:${token.column}: Invalid escape sequence '\\${esc}'.`
-          );
+          throw new ParseError(`Invalid escape sequence '\\${esc}'.`, token);
       }
     }
 
@@ -764,9 +785,7 @@ export class Parser {
     )) {
       const token = this.previous();
       if (!this.check(TokenType.LEFT_PAREN)) {
-        throw new Error(
-          `Parse error at ${token.line}:${token.column}: Expected '(' after collection constructor '${token.lexeme}'.`
-        );
+        throw new ParseError(`Expected '(' after collection constructor '${token.lexeme}'.`, token);
       }
       return { kind: "Identifier", name: token.lexeme, token };
     }
@@ -813,7 +832,7 @@ export class Parser {
       const token = this.previous();
       if (!this.match(TokenType.IDENT, TokenType.UNDERLINE)) {
         const tok = this.peek();
-        throw new Error(`Parse error at ${tok.line}:${tok.column}: Expected identifier or '_' after 'for'.`);
+        throw new ParseError(`Expected identifier or '_' after 'for'.`, tok);
       }
       const identifier = this.previous();
 
@@ -879,9 +898,7 @@ export class Parser {
 
       for (let r = 1; r < nbRows; r++) {
         if (rows[r].length !== nbCols) {
-          throw new Error(
-            `Parse error at ${token.line}:${token.column}: Matrix row ${r + 1} has ${rows[r].length} columns, expected ${nbCols}.`
-          );
+          throw new ParseError(`Matrix row ${r + 1} has ${rows[r].length} columns, expected ${nbCols}.`, token);
         }
       }
 
@@ -936,6 +953,6 @@ export class Parser {
     }
 
     const tok = this.peek();
-    throw new Error(`Unexpected token '${tok.lexeme}' at ${tok.line}:${tok.column}`);
+    throw new ParseError(`Unexpected token '${tok.lexeme}' at ${tok.line}:${tok.column}`, tok);
   }
 }

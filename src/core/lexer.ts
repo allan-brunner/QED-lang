@@ -1,3 +1,4 @@
+import { LexerError } from "./diagnostics.js";
 import { Token, TokenType, KEYWORDS } from "./token.js";
 
 // Trampoline types for stack-safe tail recursion
@@ -180,7 +181,7 @@ function scan(state: LexerState): TailCall<Token[]> {
       if (isIdentifierStart(ch)) {
         return tailCall(() => scan(readIdentifier(state)));
       }
-      throw new Error(`Unexpected character '${ch}' at ${line}:${col}`);
+      throw new LexerError(`Unexpected character '${ch}' at ${line}:${col}`, line, col, 1);
   }
 }
 
@@ -262,7 +263,7 @@ function readString(state: LexerState): LexerState {
   }
 
   if (state.source[i] !== "\"") {
-    throw new Error(`Unclosed string starting at ${state.line}:${state.col}`);
+    throw new LexerError(`Unclosed string starting at ${state.line}:${state.col}`, state.line, state.col);
   }
 
   const lexeme = state.source.slice(state.index, i + 1);
@@ -296,7 +297,7 @@ function skipBlockComment(state: LexerState): LexerState {
   }
 
   if (depth > 0) {
-    throw new Error(`Unclosed block comment starting at ${state.line}:${state.col}`);
+    throw new LexerError(`Unclosed block comment starting at ${state.line}:${state.col}`, state.line, state.col);
   }
 
   return { ...state, index: i, line, col };
@@ -336,7 +337,7 @@ function readNumber(state: LexerState): LexerState {
         i++;
       }
     } else if ((afterE === "+" || afterE === "-") && !isIdentifierStart(afterSign)) {
-      throw new Error(`Invalid scientific notation at ${state.line}:${state.col}`);
+      throw new LexerError(`Invalid scientific notation at ${state.line}:${state.col}`, state.line, state.col, 1);
     }
   }
 

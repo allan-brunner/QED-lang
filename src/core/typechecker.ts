@@ -3,15 +3,12 @@ import { Token, TokenType } from "./token.js";
 import { Scope, SymbolEntry } from "./scope.js";
 import { Type, Types, commonType, isAssignable, isInteger, isNumeric, isOrdered, isOrderedNumeric, optionalOf, promoteInteger, promoteNumeric, typeEquals, typeToString, unwrapOptional } from "./types.js";
 import { BUILTIN_MODULES, lookupBuiltinMember } from "./builtins.js";
+import { Diagnostic, QEDError, TypeCheckError } from "./diagnostics.js";
 
-export class TypeCheckError extends Error {
-    constructor(message: string, public readonly token?: Token) {
-        const loc = token ? ` at ${token.line}:${token.column}` : "";
-        super(`Type error${loc}: ${message}`);
-    }
-}
-
-export type ModuleLoader = (importPath: string) => readonly Stmt[] | undefined;
+export type ModuleLoader = (importPath: string) => {
+    readonly stmts: readonly Stmt[];
+    readonly diagnostics: readonly Diagnostic[]
+} | undefined;
 
 interface ModuleExports {
     readonly symbols: Map<string, SymbolEntry>;
@@ -65,10 +62,23 @@ export class TypeChecker {
     private readonly funcStack: FuncContext[] = [];
 
     private readonly classes = new Map<string, ClassInfo>();
-    private readonly pendingFuncs = new Set<string>();
     private currentClass?: ClassInfo;
 
     public readonly exprTypes = new Map<Expr, Type>();
+
+    private diagnostics: Diagnostic[] = [];
+
+    private capture(fn: () => void): void {
+        try {
+            fn();
+        } catch (err) {
+            if (err instanceof QEDError) {
+                this.diagnostics.push(err.toDiagnostic());
+            } else {
+                throw err;
+            }
+        }
+    }
 
     constructor(options: TypeCheckerOptions = {}) {
         this.moduleLoader = options.moduleLoader;
@@ -76,31 +86,39 @@ export class TypeChecker {
         this.loadingModules = options.loadingModules ?? new Set();
     }
 
-    public checkProgram(stmts: readonly Stmt[]): void {
-        this.hoistDeclarations(stmts);
+    public checkProgram(stmts: readonly Stmt[]): Diagnostic[] {
+        this.diagnostics = [];
         for (const stmt of stmts) {
-            this.checkStmt(stmt);
+            if (stmt.kind === "ImportDecl") this.capture(() => this.processImport(stmt));
         }
-    }
-
-    private hoistDeclarations(stmts: readonly Stmt[]): void {
-        for (const stmt of stmts) {
-            if (stmt.kind === "ImportDecl") {
-                this.processImport(stmt);
-            }
-        }
-
         for (const stmt of stmts) {
             if (stmt.kind !== "ClassDecl") continue;
-            const name = stmt.identifier.lexeme;
-            if (this.classes.has(name)) {
-                throw new TypeCheckError(`Class '${name}' is already declared.`, stmt.identifier);
+            this.capture(() => {
+                const name = stmt.identifier.lexeme;
+                if (this.classes.has(name)) {
+                    throw new TypeCheckError(`Class '${name}' is already declared.`, stmt.identifier);
+                }
+                this.classes.set(name, { name, fields: new Map(), methods: new Map() });
+            });
+        }
+        for (const stmt of stmts) {
+            if (stmt.kind === "ClassDecl" && stmt.inherits) {
+                this.capture(() => this.linkSuperclass(stmt));
             }
-            this.classes.set(name, { name, fields: new Map(), methods: new Map() });
+        }
+        for (const stmt of stmts) {
+            if (stmt.kind === "FuncDecl") this.capture(() => this.hoistFuncSignature(stmt));
+            else if (stmt.kind === "ClassDecl") this.capture(() => this.hoistClassMembers(stmt));
+        }
+        for (const stmt of stmts) {
+            this.capture(() => this.checkStmt(stmt));
         }
 
-        for (const stmt of stmts) {
-            if (stmt.kind !== "ClassDecl" || !stmt.inherits) continue;
+        return this.diagnostics;
+    }
+
+    private linkSuperclass(stmt: Stmt): void {
+        if (stmt.kind === "ClassDecl" && stmt.inherits) {
             const cls = this.classes.get(stmt.identifier.lexeme)!;
             const parentName = stmt.inherits.lexeme;
 
@@ -116,14 +134,6 @@ export class TypeChecker {
                     throw new TypeCheckError(`Circular inheritance detected involving '${cls.name}'.`, stmt.inherits);
                 }
                 cursor = this.classes.get(cursor)?.parent;
-            }
-        }
-
-        for (const stmt of stmts) {
-            if (stmt.kind === "FuncDecl") {
-                this.hoistFuncSignature(stmt);
-            } else if (stmt.kind === "ClassDecl") {
-                this.hoistClassMembers(stmt);
             }
         }
     }
@@ -161,9 +171,14 @@ export class TypeChecker {
 
         let exports = this.moduleCache.get(importPath);
         if (!exports) {
-            const ast = this.moduleLoader(importPath);
-            if (!ast) {
+            const loaded = this.moduleLoader(importPath);
+            if (!loaded) {
                 throw new TypeCheckError(`Cannot resolve module '${importPath}'.`, stmt.path);
+            }
+
+            const loadDiags = loaded.diagnostics ?? [];
+            for (const d of loadDiags) {
+                this.diagnostics.push(d.file ? d : { ...d, file: importPath });
             }
 
             this.loadingModules.add(importPath);
@@ -173,12 +188,18 @@ export class TypeChecker {
                     moduleCache: this.moduleCache,
                     loadingModules: this.loadingModules,
                 });
-                child.checkProgram(ast);
+                const childDiags = child.checkProgram(loaded.stmts);
+                for (const d of childDiags) {
+                    this.diagnostics.push(d.file ? d : { ...d, file: importPath });
+                }
+
                 exports = {
                     symbols: new Map(child.scope.entries()),
                     classes: new Map(child.classes),
                 };
-                this.moduleCache.set(importPath, exports);
+                if (loadDiags.length === 0 && childDiags.length === 0) {
+                    this.moduleCache.set(importPath, exports);
+                }
             } finally {
                 this.loadingModules.delete(importPath);
             }
@@ -225,7 +246,7 @@ export class TypeChecker {
         const name = stmt.identifier.lexeme;
         const params = this.resolveFuncParams(stmt);
 
-        if (this.pendingFuncs.has(name) || this.scope.hasOwn(name)) {
+        if (this.scope.hasOwnPendingFunc(name) || this.scope.hasOwn(name)) {
             throw new TypeCheckError(`Function '${name}' is already declared in this scope.`, stmt.identifier);
         }
 
@@ -265,7 +286,7 @@ export class TypeChecker {
                     throw new TypeCheckError(`Duplicate member '${methodName}' in class '${cls.name}'.`, member.identifier);
                 }
                 const params = this.resolveFuncParams(member);
-                const returnType = member.returnType ? this.resolveTypeNode(member.returnType) : Types.Void;
+                const returnType = member.returnType ? this.resolveTypeNode(member.returnType) : methodName === "init" ? Types.Void : undefined;
                 cls.methods.set(methodName, {
                     params,
                     returnType,
@@ -377,35 +398,37 @@ export class TypeChecker {
                 try {
                     for (const member of stmt.members) {
                         if (member.kind !== "VarDecl") continue;
-
-                        if (member.typeAnnotation) {
-                            const expected = cls.fields.get(member.name.lexeme)!.type;
-                            const initType = this.checkExpr(member.initializer, expected);
-                            if (!isAssignable(initType, expected, this.isSubclass)) {
-                                throw new TypeCheckError(
-                                    `Cannot assign '${typeToString(initType)}' to field '${member.name.lexeme}' of type '${typeToString(expected)}'.`,
-                                    member.name
-                                );
+                        this.capture(() => {
+                            if (member.typeAnnotation) {
+                                const field = cls.fields.get(member.name.lexeme);
+                                if (!field) return;
+                                const initType = this.checkExpr(member.initializer, field.type);
+                                if (!isAssignable(initType, field.type, this.isSubclass)) {
+                                    throw new TypeCheckError(
+                                        `Cannot assign '${typeToString(initType)}' to field '${member.name.lexeme}' of type '${typeToString(field.type)}'.`,
+                                        member.name
+                                    );
+                                }
+                            } else {
+                                const fieldName = member.name.lexeme;
+                                if (cls.fields.has(fieldName) || cls.methods.has(fieldName)) {
+                                    throw new TypeCheckError(`Duplicate member '${fieldName}' in class '${cls.name}'.`, member.name);
+                                }
+                                const initType = this.checkExpr(member.initializer);
+                                if (initType.kind === "Primitive" && initType.name === "None") {
+                                    throw new TypeCheckError(
+                                        `Cannot infer type of field '${fieldName}' from 'None'; add an explicit type annotation.`,
+                                        member.name
+                                    );
+                                }
+                                cls.fields.set(fieldName, { type: initType, isConst: member.isConst });
                             }
-                        } else {
-                            const fieldName = member.name.lexeme;
-                            if (cls.fields.has(fieldName) || cls.methods.has(fieldName)) {
-                                throw new TypeCheckError(`Duplicate member '${fieldName}' in class '${cls.name}'.`, member.name);
-                            }
-                            const initType = this.checkExpr(member.initializer);
-                            if (initType.kind === "Primitive" && initType.name === "None") {
-                                throw new TypeCheckError(
-                                    `Cannot infer type of field '${fieldName}' from 'None'; add an explicit type annotation.`,
-                                    member.name
-                                );
-                            }
-                            cls.fields.set(fieldName, { type: initType, isConst: member.isConst });
-                        }
+                        });
                     }
 
                     for (const member of stmt.members) {
                         if (member.kind === "FuncDecl") {
-                            this.checkFuncBody(member, true);
+                            this.capture(() => this.checkFuncBody(member, true));
                         }
                     }
                 } finally {
@@ -1004,8 +1027,12 @@ export class TypeChecker {
 
                     const method = this.lookupMethod(objType.name, prop);
                     if (method) {
-                        if (method.returnType === undefined)
-                            throw new TypeCheckError(`Method '${prop}' is referenced before its return type is inferred; add an explicit return type.`);
+                        if (method.returnType === undefined) {
+                            throw new TypeCheckError(
+                                `Method '${prop}' is referenced before its return type is inferred; add an explicit return type.`,
+                                expr.name
+                            );
+                        }
                         return method.hasParens
                             ? { kind: "Function", params: method.params, returnType: method.returnType, hasParens: true }
                             : method.returnType;
@@ -1227,14 +1254,14 @@ export class TypeChecker {
 
                 const prevScope = this.scope;
                 this.scope = new Scope(prevScope);
-                for (const stmt of expr.statements) {
-                    if (stmt.kind === "FuncDecl") {
-                        this.hoistFuncSignature(stmt);
-                    }
-                }
                 try {
                     for (const stmt of expr.statements) {
-                        this.checkStmt(stmt);
+                        if (stmt.kind === "FuncDecl") {
+                            this.hoistFuncSignature(stmt);
+                        }
+                    }
+                    for (const stmt of expr.statements) {
+                        this.capture(() => this.checkStmt(stmt))
                     }
 
                     const last = expr.statements[expr.statements.length - 1];
